@@ -1,34 +1,20 @@
-"""User configuration for ragflow_sync.py.
+"""Project configuration for `python -m ragflow_sync`.
 
-Keep real secrets out of this file. RAGFLOW_API_KEY from the environment has
-priority over API_KEY below.
+Set `RAGFLOW_API_KEY` in the environment or `.env`.
+Each sync target maps exactly one local directory to exactly one dataset.
 """
 
 BASE_URL = "https://ragapi.556554.xyz"
 
-# Each target syncs one or more local directories into exactly one RAGFlow
-# dataset. State and log paths are generated automatically from DATASET_NAME.
 SYNC_TARGETS = [
     {
         "DATASET_NAME": "TEST",
-        "LOCAL_SYNC_DIRS": ["/Users/peng/Nutstore Files/TEST"],
+        "LOCAL_DIR": "/Users/peng/Nutstore Files/TEST",
     },
     {
         "DATASET_NAME": "Obsidian-Peng",
-        "LOCAL_SYNC_DIRS": ["/Users/peng/Nutstore Files/Obsidian-Peng"],
+        "LOCAL_DIR": "/Users/peng/Nutstore Files/Obsidian-Peng",
     },
-    # {
-    #     "DATASET_NAME": "RAG Documents",
-    #     "LOCAL_SYNC_DIRS": ["/Users/peng/Nutstore Files/RAG Documents"],
-    # },
-    # {
-    #     "DATASET_NAME": "My Documents",
-    #     "LOCAL_SYNC_DIRS": ["/Users/peng/Nutstore Files/My Documents"],
-    # },
-    # {
-    #     "DATASET_NAME": "Zotero",
-    #     "LOCAL_SYNC_DIRS": ["/Users/peng/Zotero/storage"],
-    # }
 ]
 
 ALLOWED_EXTENSIONS = [
@@ -43,13 +29,13 @@ ALLOWED_EXTENSIONS = [
 
 IGNORE_DIRS = [".git", ".venv", "__pycache__", ".idea", ".DS_Store"]
 IGNORE_FILES = ["Thumbs.db", ".gitignore"]
-MAX_FILE_SIZE_MB = 100
 
+MAX_FILE_SIZE_MB = 128
 MAX_PARSE_RETRY_TIMES = 3
-
-LOG_LEVEL = "INFO"
-
 UPLOAD_BATCH_SIZE = 20
-REMOTE_PAGE_SIZE = 100
+REMOTE_PAGE_SIZE = 64
 API_RETRY_TIMES = 3
 API_RETRY_INTERVAL_SECONDS = 2
+LOG_LEVEL = "INFO"
+STATE_DIR = "states"
+LOG_DIR = "logs"
