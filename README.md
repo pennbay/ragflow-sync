@@ -68,7 +68,7 @@ RAGFLOW_API_KEY="ragflow-..."
 Run:
 
 ```bash
-python3.12 ragflow_sync.py
+python3 ragflow_sync.py
 ```
 
 Only `RAGFLOW_API_KEY` is used for the API key. The program loads `.env`
