@@ -15,6 +15,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
+import re
 import shutil
 import sys
 import tempfile
@@ -140,6 +141,23 @@ def file_md5(path: Path) -> str:
     return digest.hexdigest()
 
 
+def safe_dataset_slug(dataset_name: str) -> str:
+    raw = dataset_name.strip()
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", raw)
+    slug = re.sub(r"_+", "_", slug).strip("_")
+    if not slug:
+        raise ConfigError(f"DATASET_NAME cannot produce a safe file name: {dataset_name!r}")
+    return slug
+
+
+def default_state_file(dataset_name: str) -> Path:
+    return Path("states") / f"{safe_dataset_slug(dataset_name)}.json"
+
+
+def default_log_file(dataset_name: str) -> Path:
+    return Path("logs") / f"{safe_dataset_slug(dataset_name)}.log"
+
+
 def load_env_file(path: Path = Path(".env")) -> None:
     if not path.exists():
         return
@@ -188,28 +206,35 @@ def load_configs(module_name: str = "config") -> List[AppConfig]:
     for index, target in enumerate(targets, start=1):
         if not isinstance(target, dict):
             raise ConfigError(f"SYNC_TARGETS[{index}] must be a dict")
+        forbidden = [key for key in ("SYNC_STATE_FILE", "LOG_FILE_PATH") if key in target]
+        if forbidden:
+            raise ConfigError(
+                f"SYNC_TARGETS[{index}] must not configure: {', '.join(forbidden)}. "
+                "State and log paths are generated from DATASET_NAME."
+            )
         missing = [
             key
-            for key in ("DATASET_NAME", "LOCAL_SYNC_DIRS", "SYNC_STATE_FILE", "LOG_FILE_PATH")
+            for key in ("DATASET_NAME", "LOCAL_SYNC_DIRS")
             if not target.get(key)
         ]
         if missing:
             raise ConfigError(f"SYNC_TARGETS[{index}] missing required keys: {', '.join(missing)}")
+        dataset_name = str(target["DATASET_NAME"]).strip()
         local_dirs = target["LOCAL_SYNC_DIRS"]
         if not isinstance(local_dirs, list) or not local_dirs:
             raise ConfigError(f"SYNC_TARGETS[{index}].LOCAL_SYNC_DIRS must be a non-empty list")
         config = AppConfig(
             api_key=common["api_key"],
             base_url=common["base_url"],
-            dataset_name=str(target["DATASET_NAME"]).strip(),
+            dataset_name=dataset_name,
             local_sync_dirs=[Path(item).expanduser() for item in local_dirs],
             allowed_extensions=set(common["allowed_extensions"]),
             ignore_dirs=set(common["ignore_dirs"]),
             ignore_files=set(common["ignore_files"]),
             max_file_size_mb=int(common["max_file_size_mb"]),
             max_parse_retry_times=int(common["max_parse_retry_times"]),
-            sync_state_file=Path(target["SYNC_STATE_FILE"]).expanduser(),
-            log_file_path=Path(target["LOG_FILE_PATH"]).expanduser(),
+            sync_state_file=default_state_file(dataset_name),
+            log_file_path=default_log_file(dataset_name),
             log_level=str(common["log_level"]),
             upload_batch_size=int(common["upload_batch_size"]),
             remote_page_size=int(common["remote_page_size"]),

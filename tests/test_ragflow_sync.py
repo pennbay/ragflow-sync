@@ -230,8 +230,6 @@ class RagflowSyncTests(unittest.TestCase):
                 {
                     "DATASET_NAME": "dataset",
                     "LOCAL_SYNC_DIRS": [str(self.root)],
-                    "SYNC_STATE_FILE": str(self.root / "state.json"),
-                    "LOG_FILE_PATH": str(self.root / "sync.log"),
                 }
             ],
         )
@@ -244,6 +242,8 @@ class RagflowSyncTests(unittest.TestCase):
         self.assertEqual("env-key", config.api_key)
         self.assertIn(".pdf", config.allowed_extensions)
         self.assertIn(".txt", config.allowed_extensions)
+        self.assertEqual(Path("states") / "dataset.json", config.sync_state_file)
+        self.assertEqual(Path("logs") / "dataset.log", config.log_file_path)
 
     def test_load_configs_requires_non_empty_sync_targets(self):
         module = make_config_module(self.root, [])
@@ -260,8 +260,6 @@ class RagflowSyncTests(unittest.TestCase):
             [
                 {
                     "DATASET_NAME": "dataset",
-                    "LOCAL_SYNC_DIRS": [str(self.root)],
-                    "SYNC_STATE_FILE": str(self.root / "state.json"),
                 }
             ],
         )
@@ -269,8 +267,26 @@ class RagflowSyncTests(unittest.TestCase):
         with mock.patch.dict("sys.modules", {"missing_target_config": module}), mock.patch.dict(
             os.environ, {"RAGFLOW_API_KEY": "env-key"}
         ):
-            with self.assertRaisesRegex(sync.ConfigError, "LOG_FILE_PATH"):
+            with self.assertRaisesRegex(sync.ConfigError, "LOCAL_SYNC_DIRS"):
                 sync.load_configs("missing_target_config")
+
+    def test_load_configs_rejects_manual_state_or_log_paths(self):
+        module = make_config_module(
+            self.root,
+            [
+                {
+                    "DATASET_NAME": "dataset",
+                    "LOCAL_SYNC_DIRS": [str(self.root)],
+                    "SYNC_STATE_FILE": str(self.root / "state.json"),
+                }
+            ],
+        )
+
+        with mock.patch.dict("sys.modules", {"manual_path_config": module}), mock.patch.dict(
+            os.environ, {"RAGFLOW_API_KEY": "env-key"}
+        ):
+            with self.assertRaisesRegex(sync.ConfigError, "must not configure"):
+                sync.load_configs("manual_path_config")
 
     def test_load_configs_builds_independent_targets(self):
         one = self.root / "one"
@@ -283,14 +299,10 @@ class RagflowSyncTests(unittest.TestCase):
                 {
                     "DATASET_NAME": "dataset-one",
                     "LOCAL_SYNC_DIRS": [str(one)],
-                    "SYNC_STATE_FILE": str(self.root / "state-one.json"),
-                    "LOG_FILE_PATH": str(self.root / "one.log"),
                 },
                 {
                     "DATASET_NAME": "dataset-two",
                     "LOCAL_SYNC_DIRS": [str(two)],
-                    "SYNC_STATE_FILE": str(self.root / "state-two.json"),
-                    "LOG_FILE_PATH": str(self.root / "two.log"),
                 },
             ],
         )
@@ -303,6 +315,36 @@ class RagflowSyncTests(unittest.TestCase):
         self.assertEqual(["dataset-one", "dataset-two"], [config.dataset_name for config in configs])
         self.assertNotEqual(configs[0].sync_state_file, configs[1].sync_state_file)
         self.assertNotEqual(configs[0].log_file_path, configs[1].log_file_path)
+
+    def test_safe_dataset_slug_replaces_unsafe_characters(self):
+        self.assertEqual("Team_Docs_v1.2", sync.safe_dataset_slug(" Team Docs/中文 @ v1.2 "))
+        self.assertEqual(Path("states") / "Team_Docs_v1.2.json", sync.default_state_file(" Team Docs/中文 @ v1.2 "))
+        self.assertEqual(Path("logs") / "Team_Docs_v1.2.log", sync.default_log_file(" Team Docs/中文 @ v1.2 "))
+
+    def test_safe_dataset_slug_rejects_empty_slug(self):
+        with self.assertRaises(sync.ConfigError):
+            sync.safe_dataset_slug("中文")
+
+    def test_load_configs_rejects_duplicate_generated_paths(self):
+        module = make_config_module(
+            self.root,
+            [
+                {
+                    "DATASET_NAME": "A/B",
+                    "LOCAL_SYNC_DIRS": [str(self.root)],
+                },
+                {
+                    "DATASET_NAME": "A B",
+                    "LOCAL_SYNC_DIRS": [str(self.root)],
+                },
+            ],
+        )
+
+        with mock.patch.dict("sys.modules", {"duplicate_slug_config": module}), mock.patch.dict(
+            os.environ, {"RAGFLOW_API_KEY": "env-key"}
+        ):
+            with self.assertRaisesRegex(sync.ConfigError, "Duplicate SYNC_STATE_FILE"):
+                sync.load_configs("duplicate_slug_config")
 
     def test_run_all_continues_after_target_failure_and_returns_partial_failure(self):
         configs = [

@@ -27,16 +27,15 @@ Required settings:
 - `BASE_URL`: RAGFlow server URL.
 - `RAGFLOW_API_KEY`: preferred API key source via environment variable.
 
-Each target must define its own dataset, local directories, state file, and log
-file:
+Each target defines one dataset and one or more local directories. State and
+log files are generated automatically from `DATASET_NAME`; do not configure
+them manually.
 
 ```python
 SYNC_TARGETS = [
     {
         "DATASET_NAME": "dataset-a",
         "LOCAL_SYNC_DIRS": ["/absolute/path/to/docs-a"],
-        "SYNC_STATE_FILE": "./states/dataset-a.json",
-        "LOG_FILE_PATH": "./logs/dataset-a.log",
     },
     {
         "DATASET_NAME": "dataset-b",
@@ -44,15 +43,21 @@ SYNC_TARGETS = [
             "/absolute/path/to/docs-b-1",
             "/absolute/path/to/docs-b-2",
         ],
-        "SYNC_STATE_FILE": "./states/dataset-b.json",
-        "LOG_FILE_PATH": "./logs/dataset-b.log",
     },
 ]
 ```
 
 One target can include multiple local directories, and all directories in that
-target sync to the same dataset. Use separate state and log files for every
-target.
+target sync to the same dataset.
+
+Generated paths:
+
+- `states/{safe_dataset_name}.json`
+- `logs/{safe_dataset_name}.log`
+
+`safe_dataset_name` keeps ASCII letters, digits, `.`, `_`, and `-`; other
+characters become `_`. If two dataset names generate the same safe name, startup
+fails to protect state consistency.
 
 Example `.env`:
 
@@ -85,7 +90,7 @@ path, so files with the same filename in different directories do not collide.
 
 ## State And Logs
 
-State and log paths are configured per `SYNC_TARGETS` item.
+State and log paths are generated from each target's `DATASET_NAME`.
 
 The state file stores absolute paths, content MD5, file stat data, remote
 document IDs, parse trigger timestamps, and retry counts. It is backed up before
@@ -102,7 +107,8 @@ recomputed and the current local file remains the sync source of truth.
 - `ragflow-sdk is not installed`: run `python3.12 -m pip install -r requirements.txt`.
 - `Missing required configuration`: set `SYNC_TARGETS`, `BASE_URL`, and `RAGFLOW_API_KEY`.
 - `SYNC_TARGETS must be a non-empty list`: add at least one target in `config.py`.
-- `SYNC_TARGETS[n] missing required keys`: every target needs `DATASET_NAME`, `LOCAL_SYNC_DIRS`, `SYNC_STATE_FILE`, and `LOG_FILE_PATH`.
+- `SYNC_TARGETS[n] missing required keys`: every target needs `DATASET_NAME` and `LOCAL_SYNC_DIRS`.
+- `SYNC_TARGETS[n] must not configure`: remove `SYNC_STATE_FILE` or `LOG_FILE_PATH`; they are generated automatically.
 - `Remote consistency check failed`: at least one local file did not have a verified remote document after upload; inspect the error log and rerun after fixing the cause.
 - `Parse retry limit reached`: the remote document has failed parsing too many times. Inspect it in RAGFlow web UI.
 

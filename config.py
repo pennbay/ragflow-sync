@@ -7,20 +7,16 @@ priority over API_KEY below.
 BASE_URL = "https://ragapi.556554.xyz"
 
 # Each target syncs one or more local directories into exactly one RAGFlow
-# dataset. Every target must use its own state file and log file.
+# dataset. State and log paths are generated automatically from DATASET_NAME.
 SYNC_TARGETS = [
-    # {
-    #     "DATASET_NAME": "dataset-a",
-    #     "LOCAL_SYNC_DIRS": ["/absolute/path/to/docs-a"],
-    #     "SYNC_STATE_FILE": "./states/dataset-a.json",
-    #     "LOG_FILE_PATH": "./logs/dataset-a.log",
-    # },
-    # {
-    #     "DATASET_NAME": "dataset-b",
-    #     "LOCAL_SYNC_DIRS": ["/absolute/path/to/docs-b"],
-    #     "SYNC_STATE_FILE": "./states/dataset-b.json",
-    #     "LOG_FILE_PATH": "./logs/dataset-b.log",
-    # },
+    {
+        "DATASET_NAME": "TEST",
+        "LOCAL_SYNC_DIRS": ["/Users/peng/Nutstore Files/TEST"],
+    },
+    {
+        "DATASET_NAME": "dataset-b",
+        "LOCAL_SYNC_DIRS": ["/absolute/path/to/docs-b"],
+    },
 ]
 
 ALLOWED_EXTENSIONS = [
