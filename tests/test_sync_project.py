@@ -83,7 +83,11 @@ class SyncProjectTests(unittest.TestCase):
         self.root = Path(self.tempdir.name)
         self.logger = logging.getLogger(f"test-{id(self)}")
         self.logger.handlers.clear()
-        self.logger.addHandler(logging.NullHandler())
+        self.logger.setLevel(logging.INFO)
+        self.log_stream = io.StringIO()
+        handler = logging.StreamHandler(self.log_stream)
+        handler.setLevel(logging.INFO)
+        self.logger.addHandler(handler)
 
     def tearDown(self):
         self.tempdir.cleanup()
@@ -287,6 +291,11 @@ class SyncProjectTests(unittest.TestCase):
         self.assertEqual(["up-1"], gateway.parsed)
         self.assertEqual("up-1", state.files[local.abs_path].document_id)
         self.assertTrue(config.state_path.exists())
+        logs = self.log_stream.getvalue()
+        self.assertIn("Upload phase started. total=1", logs)
+        self.assertIn("Uploading file 1/1.", logs)
+        self.assertIn("Uploaded file 1/1.", logs)
+        self.assertIn("Async parse triggered successfully. count=1", logs)
 
     def test_executor_dry_run_writes_nothing(self):
         path = self.root / "doc.md"

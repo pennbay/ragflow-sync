@@ -73,8 +73,28 @@ def execute_sync_plan(
 
     replacement_deletes: List[str] = []
     uploaded_doc_ids: List[str] = []
-    for batch in _chunk(plan.upload_actions, config.upload_batch_size):
+    total_uploads = len(plan.upload_actions)
+    if total_uploads:
+        logger.info("Upload phase started. total=%s batch_size=%s", total_uploads, config.upload_batch_size)
+    uploaded_count = 0
+    for batch_index, batch in enumerate(_chunk(plan.upload_actions, config.upload_batch_size), start=1):
+        logger.info(
+            "Uploading batch %s. batch_size=%s uploaded=%s/%s",
+            batch_index,
+            len(batch),
+            uploaded_count,
+            total_uploads,
+        )
         for action in batch:
+            current_index = uploaded_count + 1
+            logger.info(
+                "Uploading file %s/%s. reason=%s path=%s remote_name=%s",
+                current_index,
+                total_uploads,
+                action.reason,
+                action.local_file.rel_path,
+                action.local_file.remote_name,
+            )
             uploaded = gateway.upload_document(
                 dataset_ref.dataset_id,
                 action.local_file.remote_name,
@@ -82,8 +102,19 @@ def execute_sync_plan(
             )
             state.files[action.local_file.abs_path] = _record_for_upload(action, uploaded)
             uploaded_doc_ids.append(uploaded.document_id)
+            uploaded_count += 1
+            logger.info(
+                "Uploaded file %s/%s. document_id=%s path=%s",
+                uploaded_count,
+                total_uploads,
+                uploaded.document_id,
+                action.local_file.rel_path,
+            )
             if action.previous_document_id:
                 replacement_deletes.append(action.previous_document_id)
+
+    if total_uploads:
+        logger.info("Upload phase completed. uploaded=%s/%s", uploaded_count, total_uploads)
 
     refreshed = gateway.list_documents(dataset_ref.dataset_id)
     refreshed_by_id: Dict[str, RemoteDocumentSnapshot] = {doc.document_id: doc for doc in refreshed}
@@ -101,6 +132,7 @@ def execute_sync_plan(
         if doc_id not in parse_ids:
             parse_ids.append(doc_id)
     if parse_ids:
+        logger.info("Triggering async parse. count=%s", len(parse_ids))
         gateway.trigger_async_parse(dataset_ref.dataset_id, parse_ids)
         now = utc_now()
         for tracked in state.files.values():
@@ -108,6 +140,9 @@ def execute_sync_plan(
                 tracked.last_parse_trigger_at = now
                 tracked.parse_retry_count += 1
                 tracked.last_error = ""
+        logger.info("Async parse triggered successfully. count=%s", len(parse_ids))
+    else:
+        logger.info("No documents require async parse.")
 
     state.dataset_id = dataset_ref.dataset_id
     state.dataset_name = dataset_ref.dataset_name
