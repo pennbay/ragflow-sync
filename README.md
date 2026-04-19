@@ -1,8 +1,8 @@
 # RAGFlow Local Directory Sync
 
-Synchronize multiple local directories to one RAGFlow dataset with strict file
-type filtering, idempotent uploads, remote cleanup, and asynchronous parse
-triggering.
+Synchronize multiple local directory groups to multiple RAGFlow datasets with
+strict file type filtering, idempotent uploads, remote cleanup, and asynchronous
+parse triggering.
 
 ## Requirements
 
@@ -14,7 +14,7 @@ The project uses the latest `ragflow-sdk` line, which currently requires
 Python 3.12+. Install dependencies:
 
 ```bash
-python3.12 -m pip install -r requirements.txt
+python3 -m pip install -r requirements.txt
 ```
 
 ## Configuration
@@ -23,19 +23,51 @@ Edit `config.py` only. Do not put real API keys in Git.
 
 Required settings:
 
-- `DATASET_NAME`: target RAGFlow dataset name. It is created if missing.
-- `LOCAL_SYNC_DIRS`: absolute paths to local directories.
+- `SYNC_TARGETS`: non-empty list of dataset sync targets.
 - `BASE_URL`: RAGFlow server URL.
 - `RAGFLOW_API_KEY`: preferred API key source via environment variable.
 
-Example:
+Each target must define its own dataset, local directories, state file, and log
+file:
+
+```python
+SYNC_TARGETS = [
+    {
+        "DATASET_NAME": "dataset-a",
+        "LOCAL_SYNC_DIRS": ["/absolute/path/to/docs-a"],
+        "SYNC_STATE_FILE": "./states/dataset-a.json",
+        "LOG_FILE_PATH": "./logs/dataset-a.log",
+    },
+    {
+        "DATASET_NAME": "dataset-b",
+        "LOCAL_SYNC_DIRS": [
+            "/absolute/path/to/docs-b-1",
+            "/absolute/path/to/docs-b-2",
+        ],
+        "SYNC_STATE_FILE": "./states/dataset-b.json",
+        "LOG_FILE_PATH": "./logs/dataset-b.log",
+    },
+]
+```
+
+One target can include multiple local directories, and all directories in that
+target sync to the same dataset. Use separate state and log files for every
+target.
+
+Example `.env`:
 
 ```bash
-export RAGFLOW_API_KEY="ragflow-..."
+RAGFLOW_API_KEY="ragflow-..."
+```
+
+Run:
+
+```bash
 python3.12 ragflow_sync.py
 ```
 
-`API_KEY` in `config.py` is only a fallback. `RAGFLOW_API_KEY` always wins.
+Only `RAGFLOW_API_KEY` is used for the API key. The program loads `.env`
+automatically without overriding an already exported shell variable.
 
 ## Behavior
 
@@ -53,11 +85,7 @@ path, so files with the same filename in different directories do not collide.
 
 ## State And Logs
 
-Default files:
-
-- `ragflow_sync_state.json`
-- `ragflow_sync_state.json.bak`
-- `ragflow_sync.log`
+State and log paths are configured per `SYNC_TARGETS` item.
 
 The state file stores absolute paths, content MD5, file stat data, remote
 document IDs, parse trigger timestamps, and retry counts. It is backed up before
@@ -72,7 +100,9 @@ recomputed and the current local file remains the sync source of truth.
 
 - `Python 3.12+ is required`: run with `python3.12`, not the system `python3`.
 - `ragflow-sdk is not installed`: run `python3.12 -m pip install -r requirements.txt`.
-- `Missing required configuration`: set `DATASET_NAME`, `LOCAL_SYNC_DIRS`, and `RAGFLOW_API_KEY`.
+- `Missing required configuration`: set `SYNC_TARGETS`, `BASE_URL`, and `RAGFLOW_API_KEY`.
+- `SYNC_TARGETS must be a non-empty list`: add at least one target in `config.py`.
+- `SYNC_TARGETS[n] missing required keys`: every target needs `DATASET_NAME`, `LOCAL_SYNC_DIRS`, `SYNC_STATE_FILE`, and `LOG_FILE_PATH`.
 - `Remote consistency check failed`: at least one local file did not have a verified remote document after upload; inspect the error log and rerun after fixing the cause.
 - `Parse retry limit reached`: the remote document has failed parsing too many times. Inspect it in RAGFlow web UI.
 
@@ -86,7 +116,7 @@ python3 -m unittest discover -s tests -v
 
 End-to-end verification requires a real RAGFlow instance:
 
-1. Configure `config.py`.
+1. Configure `config.py` with `SYNC_TARGETS`.
 2. Export `RAGFLOW_API_KEY`.
 3. Add test files to the configured local directory.
 4. Run `python3.12 ragflow_sync.py`.

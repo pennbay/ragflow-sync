@@ -140,35 +140,98 @@ def file_md5(path: Path) -> str:
     return digest.hexdigest()
 
 
-def load_config(module_name: str = "config") -> AppConfig:
+def load_env_file(path: Path = Path(".env")) -> None:
+    if not path.exists():
+        return
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            raw = line.strip()
+            if not raw or raw.startswith("#") or "=" not in raw:
+                continue
+            key, value = raw.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+
+def load_configs(module_name: str = "config") -> List[AppConfig]:
+    load_env_file()
     cfg = importlib.import_module(module_name)
-    api_key = os.environ.get("RAGFLOW_API_KEY") or str(getattr(cfg, "API_KEY", "")).strip()
+    api_key = os.environ.get("RAGFLOW_API_KEY", "").strip()
     base_url = str(getattr(cfg, "BASE_URL", "")).strip()
-    dataset_name = str(getattr(cfg, "DATASET_NAME", "")).strip()
-    local_dirs = list(getattr(cfg, "LOCAL_SYNC_DIRS", []))
+    targets = getattr(cfg, "SYNC_TARGETS", None)
     configured_exts = {str(ext).lower() for ext in getattr(cfg, "ALLOWED_EXTENSIONS", [])}
     allowed_extensions = DEFAULT_ALLOWED_EXTENSIONS | configured_exts
 
-    config = AppConfig(
-        api_key=api_key,
-        base_url=base_url,
-        dataset_name=dataset_name,
-        local_sync_dirs=[Path(item).expanduser() for item in local_dirs],
-        allowed_extensions=allowed_extensions,
-        ignore_dirs={str(item) for item in getattr(cfg, "IGNORE_DIRS", [])},
-        ignore_files={str(item) for item in getattr(cfg, "IGNORE_FILES", [])},
-        max_file_size_mb=int(getattr(cfg, "MAX_FILE_SIZE_MB", 100)),
-        max_parse_retry_times=int(getattr(cfg, "MAX_PARSE_RETRY_TIMES", 3)),
-        sync_state_file=Path(getattr(cfg, "SYNC_STATE_FILE", "./ragflow_sync_state.json")).expanduser(),
-        log_file_path=Path(getattr(cfg, "LOG_FILE_PATH", "./ragflow_sync.log")).expanduser(),
-        log_level=str(getattr(cfg, "LOG_LEVEL", "INFO")).upper(),
-        upload_batch_size=int(getattr(cfg, "UPLOAD_BATCH_SIZE", 20)),
-        remote_page_size=int(getattr(cfg, "REMOTE_PAGE_SIZE", 100)),
-        api_retry_times=int(getattr(cfg, "API_RETRY_TIMES", 3)),
-        api_retry_interval_seconds=float(getattr(cfg, "API_RETRY_INTERVAL_SECONDS", 2)),
-    )
-    validate_config(config)
-    return config
+    if not isinstance(targets, list) or not targets:
+        raise ConfigError("SYNC_TARGETS must be a non-empty list")
+
+    common = {
+        "api_key": api_key,
+        "base_url": base_url,
+        "allowed_extensions": allowed_extensions,
+        "ignore_dirs": {str(item) for item in getattr(cfg, "IGNORE_DIRS", [])},
+        "ignore_files": {str(item) for item in getattr(cfg, "IGNORE_FILES", [])},
+        "max_file_size_mb": int(getattr(cfg, "MAX_FILE_SIZE_MB", 100)),
+        "max_parse_retry_times": int(getattr(cfg, "MAX_PARSE_RETRY_TIMES", 3)),
+        "log_level": str(getattr(cfg, "LOG_LEVEL", "INFO")).upper(),
+        "upload_batch_size": int(getattr(cfg, "UPLOAD_BATCH_SIZE", 20)),
+        "remote_page_size": int(getattr(cfg, "REMOTE_PAGE_SIZE", 100)),
+        "api_retry_times": int(getattr(cfg, "API_RETRY_TIMES", 3)),
+        "api_retry_interval_seconds": float(getattr(cfg, "API_RETRY_INTERVAL_SECONDS", 2)),
+    }
+
+    configs: List[AppConfig] = []
+    seen_state_files: Set[str] = set()
+    seen_log_files: Set[str] = set()
+    for index, target in enumerate(targets, start=1):
+        if not isinstance(target, dict):
+            raise ConfigError(f"SYNC_TARGETS[{index}] must be a dict")
+        missing = [
+            key
+            for key in ("DATASET_NAME", "LOCAL_SYNC_DIRS", "SYNC_STATE_FILE", "LOG_FILE_PATH")
+            if not target.get(key)
+        ]
+        if missing:
+            raise ConfigError(f"SYNC_TARGETS[{index}] missing required keys: {', '.join(missing)}")
+        local_dirs = target["LOCAL_SYNC_DIRS"]
+        if not isinstance(local_dirs, list) or not local_dirs:
+            raise ConfigError(f"SYNC_TARGETS[{index}].LOCAL_SYNC_DIRS must be a non-empty list")
+        config = AppConfig(
+            api_key=common["api_key"],
+            base_url=common["base_url"],
+            dataset_name=str(target["DATASET_NAME"]).strip(),
+            local_sync_dirs=[Path(item).expanduser() for item in local_dirs],
+            allowed_extensions=set(common["allowed_extensions"]),
+            ignore_dirs=set(common["ignore_dirs"]),
+            ignore_files=set(common["ignore_files"]),
+            max_file_size_mb=int(common["max_file_size_mb"]),
+            max_parse_retry_times=int(common["max_parse_retry_times"]),
+            sync_state_file=Path(target["SYNC_STATE_FILE"]).expanduser(),
+            log_file_path=Path(target["LOG_FILE_PATH"]).expanduser(),
+            log_level=str(common["log_level"]),
+            upload_batch_size=int(common["upload_batch_size"]),
+            remote_page_size=int(common["remote_page_size"]),
+            api_retry_times=int(common["api_retry_times"]),
+            api_retry_interval_seconds=float(common["api_retry_interval_seconds"]),
+        )
+        validate_config(config)
+        state_key = str(config.sync_state_file)
+        log_key = str(config.log_file_path)
+        if state_key in seen_state_files:
+            raise ConfigError(f"Duplicate SYNC_STATE_FILE is not allowed: {state_key}")
+        if log_key in seen_log_files:
+            raise ConfigError(f"Duplicate LOG_FILE_PATH is not allowed: {log_key}")
+        seen_state_files.add(state_key)
+        seen_log_files.add(log_key)
+        configs.append(config)
+    return configs
+
+
+def load_config(module_name: str = "config") -> AppConfig:
+    """Backward-compatible helper for tests that need the first target only."""
+    return load_configs(module_name)[0]
 
 
 def validate_config(config: AppConfig) -> None:
@@ -234,7 +297,9 @@ def setup_logging(config: AppConfig) -> logging.Logger:
     logger = logging.getLogger("ragflow_sync")
     logger.handlers.clear()
     logger.setLevel(level)
-    formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    formatter = logging.Formatter(
+        f"%(asctime)s %(levelname)s dataset={config.dataset_name} %(message)s"
+    )
 
     console = logging.StreamHandler()
     console.setFormatter(formatter)
@@ -868,6 +933,25 @@ def run_sync(config: AppConfig, adapter_factory: Callable[[AppConfig, logging.Lo
     return 0
 
 
+def run_all(
+    configs: Sequence[AppConfig],
+    adapter_factory: Callable[[AppConfig, logging.Logger], RagflowClientAdapter] = RagflowClientAdapter,
+) -> int:
+    exit_code = 0
+    for config in configs:
+        try:
+            code = run_sync(config, adapter_factory=adapter_factory)
+        except (ConfigError, SyncError) as exc:
+            print(f"ERROR: dataset={config.dataset_name} {exc}", file=sys.stderr)
+            return 1
+        except Exception as exc:
+            print(f"ERROR: dataset={config.dataset_name} unexpected failure: {exc}", file=sys.stderr)
+            code = 2
+        if code != 0:
+            exit_code = 2
+    return exit_code
+
+
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Synchronize local files to a RAGFlow dataset.")
     parser.add_argument("--config-module", default="config", help="Python module name for configuration.")
@@ -877,8 +961,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     try:
-        config = load_config(args.config_module)
-        return run_sync(config)
+        configs = load_configs(args.config_module)
+        return run_all(configs)
     except (ConfigError, SyncError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

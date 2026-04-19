@@ -67,6 +67,23 @@ class FakeAdapter:
         self.parsed.extend(document_ids)
 
 
+def make_config_module(root: Path, targets):
+    module = types.ModuleType(f"temp_sync_config_{id(root)}")
+    module.BASE_URL = "http://example.test"
+    module.SYNC_TARGETS = targets
+    module.ALLOWED_EXTENSIONS = [".txt"]
+    module.IGNORE_DIRS = []
+    module.IGNORE_FILES = []
+    module.MAX_FILE_SIZE_MB = 1
+    module.MAX_PARSE_RETRY_TIMES = 3
+    module.LOG_LEVEL = "INFO"
+    module.UPLOAD_BATCH_SIZE = 1
+    module.REMOTE_PAGE_SIZE = 100
+    module.API_RETRY_TIMES = 1
+    module.API_RETRY_INTERVAL_SECONDS = 0
+    return module
+
+
 class RagflowSyncTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -207,23 +224,17 @@ class RagflowSyncTests(unittest.TestCase):
         self.assertEqual("RUNNING", state["files"][local.abs_path]["parse_status"])
 
     def test_load_config_env_api_key_priority_and_extension_defaults(self):
-        module = types.ModuleType("temp_sync_config")
-        module.API_KEY = "file-key"
-        module.BASE_URL = "http://example.test"
-        module.DATASET_NAME = "dataset"
-        module.LOCAL_SYNC_DIRS = [str(self.root)]
-        module.ALLOWED_EXTENSIONS = [".txt"]
-        module.IGNORE_DIRS = []
-        module.IGNORE_FILES = []
-        module.MAX_FILE_SIZE_MB = 1
-        module.MAX_PARSE_RETRY_TIMES = 3
-        module.SYNC_STATE_FILE = str(self.root / "state.json")
-        module.LOG_FILE_PATH = str(self.root / "sync.log")
-        module.LOG_LEVEL = "INFO"
-        module.UPLOAD_BATCH_SIZE = 1
-        module.REMOTE_PAGE_SIZE = 100
-        module.API_RETRY_TIMES = 1
-        module.API_RETRY_INTERVAL_SECONDS = 0
+        module = make_config_module(
+            self.root,
+            [
+                {
+                    "DATASET_NAME": "dataset",
+                    "LOCAL_SYNC_DIRS": [str(self.root)],
+                    "SYNC_STATE_FILE": str(self.root / "state.json"),
+                    "LOG_FILE_PATH": str(self.root / "sync.log"),
+                }
+            ],
+        )
 
         with mock.patch.dict("sys.modules", {"temp_sync_config": module}), mock.patch.dict(
             os.environ, {"RAGFLOW_API_KEY": "env-key"}
@@ -233,6 +244,84 @@ class RagflowSyncTests(unittest.TestCase):
         self.assertEqual("env-key", config.api_key)
         self.assertIn(".pdf", config.allowed_extensions)
         self.assertIn(".txt", config.allowed_extensions)
+
+    def test_load_configs_requires_non_empty_sync_targets(self):
+        module = make_config_module(self.root, [])
+
+        with mock.patch.dict("sys.modules", {"empty_targets_config": module}), mock.patch.dict(
+            os.environ, {"RAGFLOW_API_KEY": "env-key"}
+        ):
+            with self.assertRaises(sync.ConfigError):
+                sync.load_configs("empty_targets_config")
+
+    def test_load_configs_requires_target_fields(self):
+        module = make_config_module(
+            self.root,
+            [
+                {
+                    "DATASET_NAME": "dataset",
+                    "LOCAL_SYNC_DIRS": [str(self.root)],
+                    "SYNC_STATE_FILE": str(self.root / "state.json"),
+                }
+            ],
+        )
+
+        with mock.patch.dict("sys.modules", {"missing_target_config": module}), mock.patch.dict(
+            os.environ, {"RAGFLOW_API_KEY": "env-key"}
+        ):
+            with self.assertRaisesRegex(sync.ConfigError, "LOG_FILE_PATH"):
+                sync.load_configs("missing_target_config")
+
+    def test_load_configs_builds_independent_targets(self):
+        one = self.root / "one"
+        two = self.root / "two"
+        one.mkdir()
+        two.mkdir()
+        module = make_config_module(
+            self.root,
+            [
+                {
+                    "DATASET_NAME": "dataset-one",
+                    "LOCAL_SYNC_DIRS": [str(one)],
+                    "SYNC_STATE_FILE": str(self.root / "state-one.json"),
+                    "LOG_FILE_PATH": str(self.root / "one.log"),
+                },
+                {
+                    "DATASET_NAME": "dataset-two",
+                    "LOCAL_SYNC_DIRS": [str(two)],
+                    "SYNC_STATE_FILE": str(self.root / "state-two.json"),
+                    "LOG_FILE_PATH": str(self.root / "two.log"),
+                },
+            ],
+        )
+
+        with mock.patch.dict("sys.modules", {"two_target_config": module}), mock.patch.dict(
+            os.environ, {"RAGFLOW_API_KEY": "env-key"}
+        ):
+            configs = sync.load_configs("two_target_config")
+
+        self.assertEqual(["dataset-one", "dataset-two"], [config.dataset_name for config in configs])
+        self.assertNotEqual(configs[0].sync_state_file, configs[1].sync_state_file)
+        self.assertNotEqual(configs[0].log_file_path, configs[1].log_file_path)
+
+    def test_run_all_continues_after_target_failure_and_returns_partial_failure(self):
+        configs = [
+            test_config(self.root / "missing"),
+            test_config(self.root),
+        ]
+        configs[0].dataset_name = "bad"
+        configs[1].dataset_name = "good"
+        called = []
+
+        def fake_run_sync(config, adapter_factory=sync.RagflowClientAdapter):
+            called.append(config.dataset_name)
+            return 2 if config.dataset_name == "bad" else 0
+
+        with mock.patch.object(sync, "run_sync", side_effect=fake_run_sync):
+            code = sync.run_all(configs)
+
+        self.assertEqual(2, code)
+        self.assertEqual(["bad", "good"], called)
 
 
 if __name__ == "__main__":

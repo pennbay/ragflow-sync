@@ -4,12 +4,23 @@ Keep real secrets out of this file. RAGFLOW_API_KEY from the environment has
 priority over API_KEY below.
 """
 
-API_KEY = ""
-BASE_URL = "http://127.0.0.1:9380"
-DATASET_NAME = ""
+BASE_URL = "https://ragapi.556554.xyz"
 
-LOCAL_SYNC_DIRS = [
-    # "/absolute/path/to/docs",
+# Each target syncs one or more local directories into exactly one RAGFlow
+# dataset. Every target must use its own state file and log file.
+SYNC_TARGETS = [
+    # {
+    #     "DATASET_NAME": "dataset-a",
+    #     "LOCAL_SYNC_DIRS": ["/absolute/path/to/docs-a"],
+    #     "SYNC_STATE_FILE": "./states/dataset-a.json",
+    #     "LOG_FILE_PATH": "./logs/dataset-a.log",
+    # },
+    # {
+    #     "DATASET_NAME": "dataset-b",
+    #     "LOCAL_SYNC_DIRS": ["/absolute/path/to/docs-b"],
+    #     "SYNC_STATE_FILE": "./states/dataset-b.json",
+    #     "LOG_FILE_PATH": "./logs/dataset-b.log",
+    # },
 ]
 
 ALLOWED_EXTENSIONS = [
@@ -28,8 +39,6 @@ MAX_FILE_SIZE_MB = 100
 
 MAX_PARSE_RETRY_TIMES = 3
 
-SYNC_STATE_FILE = "./ragflow_sync_state.json"
-LOG_FILE_PATH = "./ragflow_sync.log"
 LOG_LEVEL = "INFO"
 
 UPLOAD_BATCH_SIZE = 20
