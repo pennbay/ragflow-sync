@@ -58,7 +58,7 @@ class FakeAdapter:
                 document_id=document_id,
                 name=local_file.remote_display_name,
                 extension=local_file.extension,
-                status="INIT",
+                status="UNSTART",
             )
         )
         return document_id
@@ -166,12 +166,12 @@ class RagflowSyncTests(unittest.TestCase):
         self.assertEqual("modified", decision.upload_tasks[0].reason)
         self.assertEqual("remote1", decision.upload_tasks[0].old_document_id)
 
-    def test_decision_parse_rules(self):
+    def test_decision_parse_rules_use_official_run_statuses(self):
         config = test_config(self.root)
         state = sync.empty_state("dataset")
         local_files = {}
         remote_docs = []
-        for status in ["INIT", "DONE", "RUNNING", "FAIL"]:
+        for status in ["UNSTART", "DONE", "RUNNING", "FAIL", "CANCEL", "UNKNOWN"]:
             path = self.root / f"{status}.md"
             path.write_text(status)
             abs_path = sync.normalize_abs_path(path)
@@ -198,10 +198,47 @@ class RagflowSyncTests(unittest.TestCase):
 
         decision = sync.decide_sync(local_files, state, remote_docs, config, self.logger)
 
-        self.assertIn("doc-INIT", decision.parse_document_ids)
+        self.assertIn("doc-UNSTART", decision.parse_document_ids)
         self.assertIn("doc-FAIL", decision.parse_document_ids)
+        self.assertIn("doc-CANCEL", decision.parse_document_ids)
         self.assertNotIn("doc-DONE", decision.parse_document_ids)
         self.assertNotIn("doc-RUNNING", decision.parse_document_ids)
+        self.assertNotIn("doc-UNKNOWN", decision.parse_document_ids)
+
+    def test_decision_stops_retry_for_fail_and_cancel_at_limit(self):
+        config = test_config(self.root)
+        state = sync.empty_state("dataset")
+        local_files = {}
+        remote_docs = []
+        for status in ["FAIL", "CANCEL"]:
+            path = self.root / f"{status}.md"
+            path.write_text(status)
+            abs_path = sync.normalize_abs_path(path)
+            local = sync.LocalFile(
+                abs_path=abs_path,
+                path=path,
+                remote_display_name=sync.make_remote_display_name(abs_path, path.name),
+                md5=sync.file_md5(path),
+                mtime_ns=path.stat().st_mtime_ns,
+                size=path.stat().st_size,
+                extension=".md",
+            )
+            local_files[abs_path] = local
+            doc_id = f"doc-{status}"
+            state["files"][abs_path] = {
+                "document_id": doc_id,
+                "remote_display_name": local.remote_display_name,
+                "md5": local.md5,
+                "mtime_ns": local.mtime_ns,
+                "size": local.size,
+                "parse_retry_count": config.max_parse_retry_times,
+            }
+            remote_docs.append(sync.RemoteDocument(doc_id, local.remote_display_name, ".md", status))
+
+        decision = sync.decide_sync(local_files, state, remote_docs, config, self.logger)
+
+        self.assertEqual([], decision.parse_document_ids)
+        self.assertEqual(set(local_files.keys()), set(decision.abnormal_files))
 
     def test_execute_order_upload_then_parse_gate(self):
         config = test_config(self.root)
@@ -222,6 +259,23 @@ class RagflowSyncTests(unittest.TestCase):
 
         self.assertEqual(["doc1"], adapter.parsed)
         self.assertEqual("RUNNING", state["files"][local.abs_path]["parse_status"])
+
+    def test_normalize_document_reads_run_not_reserved_status(self):
+        config = test_config(self.root)
+        adapter = object.__new__(sync.RagflowClientAdapter)
+        adapter.config = config
+        adapter.logger = self.logger
+        item = {
+            "id": "doc1",
+            "name": "doc.md",
+            "run": "UNSTART",
+            "status": "1",
+            "parse_status": "DONE",
+        }
+
+        doc = sync.RagflowClientAdapter._normalize_document(adapter, item)
+
+        self.assertEqual("UNSTART", doc.status)
 
     def test_load_config_env_api_key_priority_and_extension_defaults(self):
         module = make_config_module(

@@ -556,7 +556,7 @@ class RagflowClientAdapter:
     def _normalize_document(self, item: Any) -> RemoteDocument:
         name = str(self._get_value(item, "name", "display_name", "filename", default=""))
         document_id = str(self._get_value(item, "id", "document_id", default=""))
-        status = str(self._get_value(item, "run", "status", "parse_status", default="")).upper()
+        status = str(self._get_value(item, "run", default="")).upper()
         if not status:
             status = "UNKNOWN"
         return RemoteDocument(
@@ -698,17 +698,18 @@ def decide_sync(
             continue
 
         status = remote.status.upper()
-        if status == "INIT":
+        if status == "UNSTART":
             decision.parse_document_ids.append(remote.document_id)
         elif status == "DONE":
             decision.unchanged += 1
         elif status == "RUNNING":
             decision.unchanged += 1
-        elif status == "FAIL":
+        elif status in {"FAIL", "CANCEL"}:
             retries = int(record.get("parse_retry_count", 0))
             if retries < config.max_parse_retry_times:
                 logger.warning(
-                    "Remote parse failed, will retry: path=%s document_id=%s reason=%s",
+                    "Remote parse ended with %s, will retry: path=%s document_id=%s reason=%s",
+                    status,
                     abs_path,
                     remote.document_id,
                     remote.failure_reason,
@@ -716,8 +717,14 @@ def decide_sync(
                 decision.parse_document_ids.append(remote.document_id)
             else:
                 decision.abnormal_files.append(abs_path)
-                logger.warning("Parse retry limit reached: %s", abs_path)
+                logger.warning("Parse retry limit reached: path=%s status=%s", abs_path, status)
         else:
+            logger.warning(
+                "Unknown remote parse status, skipped: path=%s document_id=%s status=%s",
+                abs_path,
+                remote.document_id,
+                status,
+            )
             decision.unchanged += 1
 
     for abs_path, record in list(history.items()):
@@ -772,7 +779,7 @@ def update_state_for_upload(state: Dict[str, Any], local_file: LocalFile, docume
         "extension": local_file.extension,
         "document_id": document_id,
         "upload_time": utc_now(),
-        "parse_status": "INIT",
+        "parse_status": "UNSTART",
         "parse_retry_count": 0,
         "last_parse_trigger_time": "",
         "last_failure_reason": "",

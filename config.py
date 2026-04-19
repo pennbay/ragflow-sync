@@ -14,9 +14,21 @@ SYNC_TARGETS = [
         "LOCAL_SYNC_DIRS": ["/Users/peng/Nutstore Files/TEST"],
     },
     {
-        "DATASET_NAME": "dataset-b",
-        "LOCAL_SYNC_DIRS": ["/absolute/path/to/docs-b"],
+        "DATASET_NAME": "Obsidian-Peng",
+        "LOCAL_SYNC_DIRS": ["/Users/peng/Nutstore Files/Obsidian-Peng"],
     },
+    # {
+    #     "DATASET_NAME": "RAG Documents",
+    #     "LOCAL_SYNC_DIRS": ["/Users/peng/Nutstore Files/RAG Documents"],
+    # },
+    # {
+    #     "DATASET_NAME": "My Documents",
+    #     "LOCAL_SYNC_DIRS": ["/Users/peng/Nutstore Files/My Documents"],
+    # },
+    # {
+    #     "DATASET_NAME": "Zotero",
+    #     "LOCAL_SYNC_DIRS": ["/Users/peng/Zotero/storage"],
+    # }
 ]
 
 ALLOWED_EXTENSIONS = [
