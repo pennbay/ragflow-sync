@@ -11,9 +11,12 @@ parse triggering.
 - Official Python SDK from `requirements.txt`
 
 The project uses the latest `ragflow-sdk` line, which currently requires
-Python 3.12+. Install dependencies:
+Python 3.12+. Create and activate a virtual environment, then install
+dependencies:
 
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
 python3 -m pip install -r requirements.txt
 ```
 
@@ -68,6 +71,7 @@ RAGFLOW_API_KEY="ragflow-..."
 Run:
 
 ```bash
+source .venv/bin/activate
 python3 ragflow_sync.py
 ```
 
@@ -103,8 +107,8 @@ recomputed and the current local file remains the sync source of truth.
 
 ## Troubleshooting
 
-- `Python 3.12+ is required`: run with `python3.12`, not the system `python3`.
-- `ragflow-sdk is not installed`: run `python3.12 -m pip install -r requirements.txt`.
+- `Python 3.12+ is required`: make sure `python3` points to Python 3.12 or newer.
+- `ragflow-sdk is not installed`: activate `.venv` and run `python3 -m pip install -r requirements.txt`.
 - `Missing required configuration`: set `SYNC_TARGETS`, `BASE_URL`, and `RAGFLOW_API_KEY`.
 - `SYNC_TARGETS must be a non-empty list`: add at least one target in `config.py`.
 - `SYNC_TARGETS[n] missing required keys`: every target needs `DATASET_NAME` and `LOCAL_SYNC_DIRS`.
@@ -117,6 +121,7 @@ recomputed and the current local file remains the sync source of truth.
 Unit tests use `unittest` and mocks only:
 
 ```bash
+source .venv/bin/activate
 python3 -m unittest discover -s tests -v
 ```
 
@@ -125,5 +130,5 @@ End-to-end verification requires a real RAGFlow instance:
 1. Configure `config.py` with `SYNC_TARGETS`.
 2. Export `RAGFLOW_API_KEY`.
 3. Add test files to the configured local directory.
-4. Run `python3.12 ragflow_sync.py`.
+4. Run `source .venv/bin/activate` and then `python3 ragflow_sync.py`.
 5. Confirm upload/delete happened first and parse was triggered only after consistency verification.
