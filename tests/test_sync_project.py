@@ -1,6 +1,7 @@
 import io
 import logging
 import os
+import re
 import tempfile
 import types
 import unittest
@@ -652,6 +653,8 @@ class SyncProjectTests(unittest.TestCase):
         self.assertEqual("", state.files[bad_local.abs_path].document_id)
         self.assertIn("simulated permanent upload failure", state.files[bad_local.abs_path].last_error)
         logs = self.log_stream.getvalue()
+        upload_steps = re.findall(r"Uploading file (\d+)/3\.", logs)
+        self.assertEqual(["1", "2", "3"], upload_steps)
         self.assertIn("Upload phase completed. uploaded=2/3 failed=1", logs)
         self.assertIn("Upload failure summary: path=bad.md", logs)
 

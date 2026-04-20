@@ -196,8 +196,7 @@ def execute_sync_plan(
     if total_uploads:
         logger.info("Upload phase started. total=%s", total_uploads)
     uploaded_count = 0
-    for action in plan.upload_actions:
-        current_index = uploaded_count + 1
+    for current_index, action in enumerate(plan.upload_actions, start=1):
         logger.info(
             "Uploading file %s/%s. reason=%s path=%s remote_name=%s",
             current_index,
@@ -239,7 +238,7 @@ def execute_sync_plan(
         uploaded_count += 1
         logger.info(
             "Uploaded file %s/%s. document_id=%s path=%s",
-            uploaded_count,
+            current_index,
             total_uploads,
             uploaded.document_id,
             action.local_file.rel_path,
