@@ -64,15 +64,30 @@ Optional global settings:
 - `IGNORE_FILES`
 - `MAX_FILE_SIZE_MB`
 - `MAX_PARSE_RETRY_TIMES`
-- `UPLOAD_BATCH_SIZE`
 - `PARSE_TRIGGER_BATCH_SIZE`
 - `REMOTE_PAGE_SIZE`
 - `API_RETRY_TIMES`
 - `API_RETRY_INTERVAL_SECONDS`
 - `API_TIMEOUT_SECONDS`
+- `UPLOAD_RETRY_TIMES`
+- `UPLOAD_RETRY_INTERVAL_SECONDS`
+- `UPLOAD_TIMEOUT_SECONDS`
 - `LOG_LEVEL`
 - `STATE_DIR`
 - `LOG_DIR`
+
+Default request settings:
+
+- General API calls use shorter defaults so list/delete/parse-trigger requests
+  fail faster during outages:
+  - `API_TIMEOUT_SECONDS = 30`
+  - `API_RETRY_TIMES = 2`
+  - `API_RETRY_INTERVAL_SECONDS = 2`
+- Upload calls use separate, more forgiving defaults to reduce false timeouts
+  on large or slow documents:
+  - `UPLOAD_TIMEOUT_SECONDS = 180`
+  - `UPLOAD_RETRY_TIMES = 2`
+  - `UPLOAD_RETRY_INTERVAL_SECONDS = 3`
 
 ## Run
 

@@ -21,7 +21,7 @@ from ragflow_sync.models import (
     TrackedFileState,
 )
 from ragflow_sync.planner import build_plan
-from ragflow_sync.sdk_gateway import _meta_fields
+from ragflow_sync.sdk_gateway import RagflowGateway, _meta_fields
 from ragflow_sync.scanner import (
     is_managed_remote_name,
     parse_managed_remote_name,
@@ -43,12 +43,14 @@ def make_config(root: Path) -> SyncTargetConfig:
         ignore_dirs={".git"},
         ignore_files={"Thumbs.db"},
         max_file_size_mb=2,
-        upload_batch_size=2,
         remote_page_size=100,
         parse_trigger_batch_size=32,
         api_retry_times=1,
         api_retry_interval_seconds=0.0,
         api_timeout_seconds=60.0,
+        upload_retry_times=2,
+        upload_retry_interval_seconds=0.0,
+        upload_timeout_seconds=180.0,
         log_level="ERROR",
         state_dir=root / "states",
         log_dir=root / "logs",
@@ -162,11 +164,13 @@ class SyncProjectTests(unittest.TestCase):
         module.IGNORE_DIRS = []
         module.IGNORE_FILES = []
         module.MAX_FILE_SIZE_MB = 1
-        module.UPLOAD_BATCH_SIZE = 1
         module.REMOTE_PAGE_SIZE = 10
         module.API_RETRY_TIMES = 1
         module.API_RETRY_INTERVAL_SECONDS = 0
         module.API_TIMEOUT_SECONDS = 60
+        module.UPLOAD_RETRY_TIMES = 2
+        module.UPLOAD_RETRY_INTERVAL_SECONDS = 3
+        module.UPLOAD_TIMEOUT_SECONDS = 180
         module.PARSE_TRIGGER_BATCH_SIZE = 32
         module.LOG_LEVEL = "INFO"
         module.STATE_DIR = "states"
@@ -181,7 +185,59 @@ class SyncProjectTests(unittest.TestCase):
         self.assertIn(".pdf", configs[0].allowed_extensions)
         self.assertEqual(32, configs[0].parse_trigger_batch_size)
         self.assertEqual(60.0, configs[0].api_timeout_seconds)
+        self.assertEqual(2, configs[0].upload_retry_times)
+        self.assertEqual(3.0, configs[0].upload_retry_interval_seconds)
+        self.assertEqual(180.0, configs[0].upload_timeout_seconds)
         self.assertEqual(Path("states") / "dataset.json", configs[0].state_path)
+
+    def test_load_config_uses_split_api_and_upload_defaults(self):
+        module = types.ModuleType("defaults_config")
+        module.BASE_URL = "http://example.test"
+        module.SYNC_TARGETS = [{"DATASET_NAME": "dataset", "LOCAL_DIR": str(self.root)}]
+        with mock.patch.dict("sys.modules", {"defaults_config": module}), mock.patch.dict(
+            os.environ, {"RAGFLOW_API_KEY": "env-key"}
+        ):
+            configs = load_config("defaults_config")
+
+        self.assertEqual(30.0, configs[0].api_timeout_seconds)
+        self.assertEqual(2, configs[0].api_retry_times)
+        self.assertEqual(2.0, configs[0].api_retry_interval_seconds)
+        self.assertEqual(180.0, configs[0].upload_timeout_seconds)
+        self.assertEqual(2, configs[0].upload_retry_times)
+        self.assertEqual(3.0, configs[0].upload_retry_interval_seconds)
+
+    def test_load_config_rejects_invalid_upload_retry_times(self):
+        module = types.ModuleType("bad_upload_retry_config")
+        module.BASE_URL = "http://example.test"
+        module.SYNC_TARGETS = [{"DATASET_NAME": "dataset", "LOCAL_DIR": str(self.root)}]
+        module.UPLOAD_RETRY_TIMES = 0
+        with mock.patch.dict("sys.modules", {"bad_upload_retry_config": module}), mock.patch.dict(
+            os.environ, {"RAGFLOW_API_KEY": "env-key"}
+        ):
+            with self.assertRaisesRegex(ConfigError, "UPLOAD_RETRY_TIMES"):
+                load_config("bad_upload_retry_config")
+
+    def test_load_config_rejects_invalid_upload_retry_interval(self):
+        module = types.ModuleType("bad_upload_retry_interval_config")
+        module.BASE_URL = "http://example.test"
+        module.SYNC_TARGETS = [{"DATASET_NAME": "dataset", "LOCAL_DIR": str(self.root)}]
+        module.UPLOAD_RETRY_INTERVAL_SECONDS = 0
+        with mock.patch.dict("sys.modules", {"bad_upload_retry_interval_config": module}), mock.patch.dict(
+            os.environ, {"RAGFLOW_API_KEY": "env-key"}
+        ):
+            with self.assertRaisesRegex(ConfigError, "UPLOAD_RETRY_INTERVAL_SECONDS"):
+                load_config("bad_upload_retry_interval_config")
+
+    def test_load_config_rejects_invalid_upload_timeout(self):
+        module = types.ModuleType("bad_upload_timeout_config")
+        module.BASE_URL = "http://example.test"
+        module.SYNC_TARGETS = [{"DATASET_NAME": "dataset", "LOCAL_DIR": str(self.root)}]
+        module.UPLOAD_TIMEOUT_SECONDS = 0
+        with mock.patch.dict("sys.modules", {"bad_upload_timeout_config": module}), mock.patch.dict(
+            os.environ, {"RAGFLOW_API_KEY": "env-key"}
+        ):
+            with self.assertRaisesRegex(ConfigError, "UPLOAD_TIMEOUT_SECONDS"):
+                load_config("bad_upload_timeout_config")
 
     def test_load_config_rejects_duplicate_directory(self):
         module = types.ModuleType("dup_dir_config")
@@ -266,6 +322,72 @@ class SyncProjectTests(unittest.TestCase):
         self.assertEqual({"a": 1}, _meta_fields(JsonLike({"a": 1})))
         self.assertEqual({"b": 2}, _meta_fields({"b": 2}))
         self.assertEqual({}, _meta_fields(None))
+
+    def test_gateway_upload_uses_upload_timeout_and_restores_api_timeout(self):
+        config = make_config(self.root)
+        config = SyncTargetConfig(
+            **{
+                **config.__dict__,
+                "api_timeout_seconds": 30.0,
+                "upload_timeout_seconds": 180.0,
+            }
+        )
+        timeout_calls = []
+
+        class FakeDoc:
+            id = "doc-1"
+            name = "doc.md"
+            run = "UNSTART"
+            progress = 0.0
+            chunk_count = 0
+            token_count = 0
+            size = 3
+            meta_fields = None
+
+        class FakeDataset:
+            def __init__(self, client):
+                self.client = client
+
+            def upload_documents(self, payload):
+                timeout_calls.append(self.client.get("/datasets"))
+                return [FakeDoc()]
+
+        class FakeClient:
+            def __init__(self):
+                self.api_url = "http://example.test"
+                self.authorization_header = {"Authorization": "Bearer key"}
+
+            def list_datasets(self, **kwargs):
+                return []
+
+            def create_dataset(self, name):
+                return type("DatasetRefLike", (), {"id": "ds1", "name": name})()
+
+        fake_client = FakeClient()
+        path = self.root / "doc.md"
+        path.write_text("hey")
+
+        with mock.patch("ragflow_sync.sdk_gateway.RAGFlow", return_value=fake_client), mock.patch(
+            "ragflow_sync.sdk_gateway.requests.get",
+            side_effect=lambda **kwargs: kwargs["timeout"],
+        ), mock.patch(
+            "ragflow_sync.sdk_gateway.requests.post",
+            side_effect=lambda **kwargs: kwargs["timeout"],
+        ), mock.patch(
+            "ragflow_sync.sdk_gateway.requests.delete",
+            side_effect=lambda **kwargs: kwargs["timeout"],
+        ), mock.patch(
+            "ragflow_sync.sdk_gateway.requests.put",
+            side_effect=lambda **kwargs: kwargs["timeout"],
+        ):
+            gateway = RagflowGateway(config, self.logger)
+            gateway._datasets_by_id["ds1"] = FakeDataset(fake_client)
+            uploaded = gateway.upload_document_once("ds1", "doc.md", path)
+            after_timeout = gateway.client.get("/datasets")
+
+        self.assertEqual("doc-1", uploaded.document_id)
+        self.assertEqual([180.0], timeout_calls)
+        self.assertEqual(30.0, after_timeout)
 
     def test_remote_name_is_stable_for_same_long_file(self):
         filename = f"{'资料' * 80}.pdf"
@@ -532,6 +654,40 @@ class SyncProjectTests(unittest.TestCase):
         logs = self.log_stream.getvalue()
         self.assertIn("Upload phase completed. uploaded=2/3 failed=1", logs)
         self.assertIn("Upload failure summary: path=bad.md", logs)
+
+    def test_executor_uses_upload_retry_count_in_logs(self):
+        path = self.root / "bad.md"
+        path.write_text("bad")
+        config = make_config(self.root)
+        config = SyncTargetConfig(
+            **{
+                **config.__dict__,
+                "api_retry_times": 5,
+                "upload_retry_times": 2,
+                "upload_retry_interval_seconds": 0.0,
+            }
+        )
+        state = empty_state(config.dataset_name, "ds1", str(config.local_dir))
+        local_files = scan_local_files(config, state, self.logger)
+        bad_local = next(iter(local_files.values()))
+        plan = build_plan(local_files, [], state, config)
+        gateway = FakeGateway(fail_upload_names={bad_local.remote_name})
+
+        code = execute_sync_plan(
+            gateway,
+            DatasetRef(dataset_id="ds1", dataset_name=config.dataset_name),
+            config,
+            state,
+            plan,
+            self.logger,
+            dry_run=False,
+        )
+
+        self.assertEqual(2, code)
+        logs = self.log_stream.getvalue()
+        self.assertIn("attempt=1/2", logs)
+        self.assertIn("attempt=2/2", logs)
+        self.assertNotIn("attempt=1/5", logs)
 
     def test_executor_keeps_previous_remote_when_modified_upload_fails(self):
         path = self.root / "doc.md"

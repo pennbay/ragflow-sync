@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Dict, List
 
 from .models import (
@@ -82,7 +83,7 @@ def _upload_with_recovery(
 ) -> RemoteDocumentSnapshot:
     upload = getattr(gateway, "upload_document_once", gateway.upload_document)
     last_error: SyncError | None = None
-    for attempt in range(1, config.api_retry_times + 1):
+    for attempt in range(1, config.upload_retry_times + 1):
         try:
             return upload(
                 dataset_id,
@@ -97,7 +98,7 @@ def _upload_with_recovery(
                     "Upload call failed but remote document exists; adopting. "
                     "attempt=%s/%s document_id=%s path=%s",
                     attempt,
-                    config.api_retry_times,
+                    config.upload_retry_times,
                     recovered.document_id,
                     action.local_file.rel_path,
                 )
@@ -106,10 +107,12 @@ def _upload_with_recovery(
                 "Upload attempt failed and no remote document was found. "
                 "attempt=%s/%s path=%s reason=%s",
                 attempt,
-                config.api_retry_times,
+                config.upload_retry_times,
                 action.local_file.rel_path,
                 exc,
             )
+            if attempt < config.upload_retry_times:
+                time.sleep(config.upload_retry_interval_seconds)
     if last_error is not None:
         raise last_error
     raise SyncError(f"Upload failed without error: {action.local_file.rel_path}")
@@ -191,66 +194,58 @@ def execute_sync_plan(
     upload_failures: List[tuple[str, str]] = []
     total_uploads = len(plan.upload_actions)
     if total_uploads:
-        logger.info("Upload phase started. total=%s batch_size=%s", total_uploads, config.upload_batch_size)
+        logger.info("Upload phase started. total=%s", total_uploads)
     uploaded_count = 0
-    for batch_index, batch in enumerate(_chunk(plan.upload_actions, config.upload_batch_size), start=1):
+    for action in plan.upload_actions:
+        current_index = uploaded_count + 1
         logger.info(
-            "Uploading batch %s. batch_size=%s uploaded=%s/%s",
-            batch_index,
-            len(batch),
-            uploaded_count,
+            "Uploading file %s/%s. reason=%s path=%s remote_name=%s",
+            current_index,
             total_uploads,
+            action.reason,
+            action.local_file.rel_path,
+            action.local_file.remote_name,
         )
-        for action in batch:
-            current_index = uploaded_count + 1
-            logger.info(
-                "Uploading file %s/%s. reason=%s path=%s remote_name=%s",
-                current_index,
-                total_uploads,
-                action.reason,
-                action.local_file.rel_path,
-                action.local_file.remote_name,
+        try:
+            uploaded = _upload_with_recovery(
+                gateway,
+                dataset_ref.dataset_id,
+                action,
+                config,
+                logger,
             )
-            try:
-                uploaded = _upload_with_recovery(
-                    gateway,
-                    dataset_ref.dataset_id,
-                    action,
-                    config,
-                    logger,
-                )
-            except SyncError as exc:
-                error_message = str(exc)
-                upload_failures.append((action.local_file.rel_path, error_message))
-                state.files[action.local_file.abs_path] = _record_upload_failure(
-                    action.local_file,
-                    error_message,
-                )
-                _save_progress(config, state, dataset_ref)
-                logger.warning(
-                    "Upload failed; continuing with remaining files. path=%s reason=%s",
-                    action.local_file.rel_path,
-                    error_message,
-                )
-                continue
-            now = utc_now()
-            state.files[action.local_file.abs_path] = _record_for_local_file(
+        except SyncError as exc:
+            error_message = str(exc)
+            upload_failures.append((action.local_file.rel_path, error_message))
+            state.files[action.local_file.abs_path] = _record_upload_failure(
                 action.local_file,
-                uploaded.document_id,
-                last_upload_at=now,
+                error_message,
             )
             _save_progress(config, state, dataset_ref)
-            uploaded_doc_ids.append(uploaded.document_id)
-            uploaded_count += 1
-            logger.info(
-                "Uploaded file %s/%s. document_id=%s path=%s",
-                uploaded_count,
-                total_uploads,
-                uploaded.document_id,
+            logger.warning(
+                "Upload failed; continuing with remaining files. path=%s reason=%s",
                 action.local_file.rel_path,
+                error_message,
             )
-            if action.previous_document_id:
-                replacement_deletes.append(action.previous_document_id)
+            continue
+        now = utc_now()
+        state.files[action.local_file.abs_path] = _record_for_local_file(
+            action.local_file,
+            uploaded.document_id,
+            last_upload_at=now,
+        )
+        _save_progress(config, state, dataset_ref)
+        uploaded_doc_ids.append(uploaded.document_id)
+        uploaded_count += 1
+        logger.info(
+            "Uploaded file %s/%s. document_id=%s path=%s",
+            uploaded_count,
+            total_uploads,
+            uploaded.document_id,
+            action.local_file.rel_path,
+        )
+        if action.previous_document_id:
+            replacement_deletes.append(action.previous_document_id)
 
     if total_uploads:
         logger.info(
