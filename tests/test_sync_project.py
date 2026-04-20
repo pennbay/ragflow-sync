@@ -21,6 +21,7 @@ from ragflow_sync.models import (
     TrackedFileState,
 )
 from ragflow_sync.planner import build_plan
+from ragflow_sync.sdk_gateway import _meta_fields
 from ragflow_sync.scanner import (
     is_managed_remote_name,
     parse_managed_remote_name,
@@ -44,8 +45,10 @@ def make_config(root: Path) -> SyncTargetConfig:
         max_file_size_mb=2,
         upload_batch_size=2,
         remote_page_size=100,
+        parse_trigger_batch_size=32,
         api_retry_times=1,
         api_retry_interval_seconds=0.0,
+        api_timeout_seconds=60.0,
         log_level="ERROR",
         state_dir=root / "states",
         log_dir=root / "logs",
@@ -59,6 +62,7 @@ class FakeGateway:
         self.deleted = []
         self.uploaded = []
         self.parsed = []
+        self.parse_batches = []
         self.fail_upload_once = fail_upload_once
 
     def delete_documents(self, dataset_id, document_ids):
@@ -89,14 +93,22 @@ class FakeGateway:
         return list(self.docs)
 
     def trigger_async_parse(self, dataset_id, document_ids):
+        self.parse_batches.append(list(document_ids))
         self.parsed.extend(document_ids)
 
 
 class FailingParseGateway(FakeGateway):
+    def __init__(self, docs=None, fail_upload_once=False, fail_on_batch=1):
+        super().__init__(docs=docs, fail_upload_once=fail_upload_once)
+        self.fail_on_batch = fail_on_batch
+
     def trigger_async_parse(self, dataset_id, document_ids):
         from ragflow_sync.models import SyncApiError
 
-        raise SyncApiError("simulated parse failure")
+        self.parse_batches.append(list(document_ids))
+        if len(self.parse_batches) == self.fail_on_batch:
+            raise SyncApiError("simulated parse failure")
+        self.parsed.extend(document_ids)
 
 
 def tracked_for(local, document_id="doc1", **overrides):
@@ -112,6 +124,14 @@ def tracked_for(local, document_id="doc1", **overrides):
     }
     values.update(overrides)
     return TrackedFileState(**values)
+
+
+class JsonLike:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def to_json(self):
+        return self.payload
 
 
 class SyncProjectTests(unittest.TestCase):
@@ -141,6 +161,8 @@ class SyncProjectTests(unittest.TestCase):
         module.REMOTE_PAGE_SIZE = 10
         module.API_RETRY_TIMES = 1
         module.API_RETRY_INTERVAL_SECONDS = 0
+        module.API_TIMEOUT_SECONDS = 60
+        module.PARSE_TRIGGER_BATCH_SIZE = 32
         module.LOG_LEVEL = "INFO"
         module.STATE_DIR = "states"
         module.LOG_DIR = "logs"
@@ -152,6 +174,8 @@ class SyncProjectTests(unittest.TestCase):
         self.assertEqual(1, len(configs))
         self.assertEqual(self.root.resolve(), configs[0].local_dir)
         self.assertIn(".pdf", configs[0].allowed_extensions)
+        self.assertEqual(32, configs[0].parse_trigger_batch_size)
+        self.assertEqual(60.0, configs[0].api_timeout_seconds)
         self.assertEqual(Path("states") / "dataset.json", configs[0].state_path)
 
     def test_load_config_rejects_duplicate_directory(self):
@@ -166,6 +190,17 @@ class SyncProjectTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ConfigError, "Duplicate LOCAL_DIR"):
                 load_config("dup_dir_config")
+
+    def test_load_config_rejects_invalid_parse_batch_size(self):
+        module = types.ModuleType("bad_parse_batch_config")
+        module.BASE_URL = "http://example.test"
+        module.SYNC_TARGETS = [{"DATASET_NAME": "dataset", "LOCAL_DIR": str(self.root)}]
+        module.PARSE_TRIGGER_BATCH_SIZE = 0
+        with mock.patch.dict("sys.modules", {"bad_parse_batch_config": module}), mock.patch.dict(
+            os.environ, {"RAGFLOW_API_KEY": "env-key"}
+        ):
+            with self.assertRaisesRegex(ConfigError, "PARSE_TRIGGER_BATCH_SIZE"):
+                load_config("bad_parse_batch_config")
 
     def test_scan_local_files_filters_and_builds_remote_name(self):
         (self.root / "doc.md").write_text("hello")
@@ -221,6 +256,11 @@ class SyncProjectTests(unittest.TestCase):
         self.assertEqual("你", utf8_truncate("你好", 3))
         self.assertEqual("file", utf8_truncate("你好", 2))
         self.assertEqual("abc", utf8_truncate("abc   ", 6))
+
+    def test_gateway_meta_fields_accepts_sdk_base_like_object(self):
+        self.assertEqual({"a": 1}, _meta_fields(JsonLike({"a": 1})))
+        self.assertEqual({"b": 2}, _meta_fields({"b": 2}))
+        self.assertEqual({}, _meta_fields(None))
 
     def test_remote_name_is_stable_for_same_long_file(self):
         filename = f"{'资料' * 80}.pdf"
@@ -454,6 +494,80 @@ class SyncProjectTests(unittest.TestCase):
         self.assertEqual(1, len(gateway.uploaded))
         self.assertEqual("up-1", state.files[local.abs_path].document_id)
         self.assertEqual(["up-1"], gateway.parsed)
+
+    def test_executor_triggers_parse_in_batches(self):
+        config = make_config(self.root)
+        config = SyncTargetConfig(**{**config.__dict__, "parse_trigger_batch_size": 32})
+        state = empty_state(config.dataset_name, "ds1", str(config.local_dir))
+        for index in range(106):
+            path = self.root / f"doc-{index}.md"
+            path.write_text(f"hello {index}")
+        local_files = scan_local_files(config, state, self.logger)
+        for index, local in enumerate(local_files.values()):
+            state.files[local.abs_path] = tracked_for(local, document_id=f"doc-{index}")
+        remote_docs = [
+            RemoteDocumentSnapshot(f"doc-{index}", local.remote_name, ParseRunStatus.UNSTART, 0.0, 0, 0)
+            for index, local in enumerate(local_files.values())
+        ]
+        plan = build_plan(local_files, remote_docs, state, config)
+        gateway = FakeGateway(docs=remote_docs)
+
+        code = execute_sync_plan(
+            gateway,
+            DatasetRef(dataset_id="ds1", dataset_name=config.dataset_name),
+            config,
+            state,
+            plan,
+            self.logger,
+            dry_run=False,
+        )
+
+        self.assertEqual(0, code)
+        self.assertEqual([32, 32, 32, 10], [len(batch) for batch in gateway.parse_batches])
+        self.assertTrue(all(item.parse_retry_count == 1 for item in state.files.values()))
+        logs = self.log_stream.getvalue()
+        self.assertIn("Triggering async parse. total=106 batch_size=32", logs)
+        self.assertIn("Async parse batch triggered. batch=4 triggered=106/106", logs)
+
+    def test_executor_saves_successful_parse_batches_before_later_failure(self):
+        config = make_config(self.root)
+        config = SyncTargetConfig(**{**config.__dict__, "parse_trigger_batch_size": 2})
+        state = empty_state(config.dataset_name, "ds1", str(config.local_dir))
+        for index in range(5):
+            path = self.root / f"doc-{index}.md"
+            path.write_text(f"hello {index}")
+        local_files = scan_local_files(config, state, self.logger)
+        ordered_locals = list(local_files.values())
+        for index, local in enumerate(ordered_locals):
+            state.files[local.abs_path] = tracked_for(local, document_id=f"doc-{index}")
+        remote_docs = [
+            RemoteDocumentSnapshot(f"doc-{index}", local.remote_name, ParseRunStatus.UNSTART, 0.0, 0, 0)
+            for index, local in enumerate(ordered_locals)
+        ]
+        plan = build_plan(local_files, remote_docs, state, config)
+        gateway = FailingParseGateway(docs=remote_docs, fail_on_batch=2)
+
+        with self.assertRaises(Exception):
+            execute_sync_plan(
+                gateway,
+                DatasetRef(dataset_id="ds1", dataset_name=config.dataset_name),
+                config,
+                state,
+                plan,
+                self.logger,
+                dry_run=False,
+            )
+
+        loaded = load_state(config.state_path, config.dataset_name, str(config.local_dir), self.logger)
+        retry_counts = {
+            tracked.document_id: tracked.parse_retry_count
+            for tracked in loaded.files.values()
+        }
+        self.assertEqual(1, retry_counts["doc-0"])
+        self.assertEqual(1, retry_counts["doc-1"])
+        self.assertEqual(0, retry_counts["doc-2"])
+        self.assertEqual(0, retry_counts["doc-3"])
+        self.assertEqual(0, retry_counts["doc-4"])
 
     def test_executor_dry_run_writes_nothing(self):
         path = self.root / "doc.md"

@@ -36,8 +36,10 @@ def load_config(module_name: str = "config") -> List[SyncTargetConfig]:
     max_file_size_mb = int(getattr(module, "MAX_FILE_SIZE_MB", 100))
     upload_batch_size = int(getattr(module, "UPLOAD_BATCH_SIZE", 20))
     remote_page_size = int(getattr(module, "REMOTE_PAGE_SIZE", 100))
+    parse_trigger_batch_size = int(getattr(module, "PARSE_TRIGGER_BATCH_SIZE", 32))
     api_retry_times = int(getattr(module, "API_RETRY_TIMES", 3))
     api_retry_interval_seconds = float(getattr(module, "API_RETRY_INTERVAL_SECONDS", 2))
+    api_timeout_seconds = float(getattr(module, "API_TIMEOUT_SECONDS", 60))
     log_level = str(getattr(module, "LOG_LEVEL", "INFO")).upper()
     state_dir = Path(str(getattr(module, "STATE_DIR", "states"))).expanduser()
     log_dir = Path(str(getattr(module, "LOG_DIR", "logs"))).expanduser()
@@ -55,8 +57,12 @@ def load_config(module_name: str = "config") -> List[SyncTargetConfig]:
         raise ConfigError("UPLOAD_BATCH_SIZE must be > 0")
     if remote_page_size <= 0:
         raise ConfigError("REMOTE_PAGE_SIZE must be > 0")
+    if parse_trigger_batch_size <= 0:
+        raise ConfigError("PARSE_TRIGGER_BATCH_SIZE must be > 0")
     if api_retry_times <= 0:
         raise ConfigError("API_RETRY_TIMES must be > 0")
+    if api_timeout_seconds <= 0:
+        raise ConfigError("API_TIMEOUT_SECONDS must be > 0")
     if max_parse_retry_times < 0:
         raise ConfigError("MAX_PARSE_RETRY_TIMES must be >= 0")
     invalid_extensions = [ext for ext in allowed_extensions if not ext.startswith(".")]
@@ -100,8 +106,10 @@ def load_config(module_name: str = "config") -> List[SyncTargetConfig]:
                 max_file_size_mb=max_file_size_mb,
                 upload_batch_size=upload_batch_size,
                 remote_page_size=remote_page_size,
+                parse_trigger_batch_size=parse_trigger_batch_size,
                 api_retry_times=api_retry_times,
                 api_retry_interval_seconds=api_retry_interval_seconds,
+                api_timeout_seconds=api_timeout_seconds,
                 log_level=log_level,
                 state_dir=state_dir,
                 log_dir=log_dir,

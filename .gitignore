@@ -14,3 +14,4 @@ logs/
 ragflow_sync_state.json
 ragflow_sync_state.json.bak
 ragflow_sync.log*
+.DS_Store

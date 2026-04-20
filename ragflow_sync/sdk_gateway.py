@@ -4,9 +4,23 @@ import time
 from pathlib import Path
 from typing import Dict, List
 
+import requests
 from ragflow_sdk import RAGFlow
 
 from .models import DatasetRef, ParseRunStatus, RemoteDocumentSnapshot, SyncApiError, SyncTargetConfig
+
+
+def _meta_fields(value: object) -> Dict[str, object]:
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return dict(value)
+    to_json = getattr(value, "to_json", None)
+    if callable(to_json):
+        converted = to_json()
+        if isinstance(converted, dict):
+            return converted
+    return {}
 
 
 class RagflowGateway:
@@ -14,7 +28,43 @@ class RagflowGateway:
         self.config = config
         self.logger = logger
         self.client = RAGFlow(api_key=config.api_key, base_url=config.base_url)
+        self._install_timeout_transport()
         self._datasets_by_id: Dict[str, object] = {}
+
+    def _install_timeout_transport(self) -> None:
+        timeout = self.config.api_timeout_seconds
+        api_url = self.client.api_url
+        headers = self.client.authorization_header
+
+        def post(path, json=None, stream=False, files=None):
+            return requests.post(
+                url=api_url + path,
+                json=json,
+                headers=headers,
+                stream=stream,
+                files=files,
+                timeout=timeout,
+            )
+
+        def get(path, params=None, json=None):
+            return requests.get(
+                url=api_url + path,
+                params=params,
+                headers=headers,
+                json=json,
+                timeout=timeout,
+            )
+
+        def delete(path, json):
+            return requests.delete(url=api_url + path, json=json, headers=headers, timeout=timeout)
+
+        def put(path, json):
+            return requests.put(url=api_url + path, json=json, headers=headers, timeout=timeout)
+
+        self.client.post = post
+        self.client.get = get
+        self.client.delete = delete
+        self.client.put = put
 
     def _retry(self, description: str, func):
         last_exc = None
@@ -77,7 +127,7 @@ class RagflowGateway:
                         chunk_count=int(doc.chunk_count or 0),
                         token_count=int(doc.token_count or 0),
                         size=int(doc.size or 0),
-                        meta_fields=dict(doc.meta_fields or {}),
+                        meta_fields=_meta_fields(doc.meta_fields),
                     )
                 )
             if len(batch) < self.config.remote_page_size:
@@ -101,7 +151,7 @@ class RagflowGateway:
                 chunk_count=int(doc.chunk_count or 0),
                 token_count=int(doc.token_count or 0),
                 size=int(doc.size or 0),
-                meta_fields=dict(doc.meta_fields or {}),
+                meta_fields=_meta_fields(doc.meta_fields),
             )
         try:
             return action()

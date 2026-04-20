@@ -109,6 +109,15 @@ def _adopt_document(
     _save_progress(config, state, dataset_ref)
 
 
+def _mark_parse_triggered(state: SyncState, document_ids: List[str], triggered_at: str) -> None:
+    document_id_set = set(document_ids)
+    for tracked in state.files.values():
+        if tracked.document_id in document_id_set:
+            tracked.last_parse_trigger_at = triggered_at
+            tracked.parse_retry_count += 1
+            tracked.last_error = ""
+
+
 def describe_plan(plan: SyncPlan) -> str:
     return (
         f"deletes={len(plan.delete_actions)} "
@@ -231,15 +240,35 @@ def execute_sync_plan(
         if doc_id not in parse_ids:
             parse_ids.append(doc_id)
     if parse_ids:
-        logger.info("Triggering async parse. count=%s", len(parse_ids))
-        gateway.trigger_async_parse(dataset_ref.dataset_id, parse_ids)
-        now = utc_now()
-        for tracked in state.files.values():
-            if tracked.document_id in parse_ids:
-                tracked.last_parse_trigger_at = now
-                tracked.parse_retry_count += 1
-                tracked.last_error = ""
-        _save_progress(config, state, dataset_ref)
+        total_parse = len(parse_ids)
+        triggered_count = 0
+        logger.info(
+            "Triggering async parse. total=%s batch_size=%s",
+            total_parse,
+            config.parse_trigger_batch_size,
+        )
+        for batch_index, batch in enumerate(
+            _chunk(parse_ids, config.parse_trigger_batch_size),
+            start=1,
+        ):
+            logger.info(
+                "Triggering async parse batch %s. batch_size=%s triggered=%s/%s",
+                batch_index,
+                len(batch),
+                triggered_count,
+                total_parse,
+            )
+            gateway.trigger_async_parse(dataset_ref.dataset_id, batch)
+            now = utc_now()
+            _mark_parse_triggered(state, batch, now)
+            _save_progress(config, state, dataset_ref)
+            triggered_count += len(batch)
+            logger.info(
+                "Async parse batch triggered. batch=%s triggered=%s/%s",
+                batch_index,
+                triggered_count,
+                total_parse,
+            )
         logger.info("Async parse triggered successfully. count=%s", len(parse_ids))
     else:
         logger.info("No documents require async parse.")

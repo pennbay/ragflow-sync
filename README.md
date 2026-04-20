@@ -65,9 +65,11 @@ Optional global settings:
 - `MAX_FILE_SIZE_MB`
 - `MAX_PARSE_RETRY_TIMES`
 - `UPLOAD_BATCH_SIZE`
+- `PARSE_TRIGGER_BATCH_SIZE`
 - `REMOTE_PAGE_SIZE`
 - `API_RETRY_TIMES`
 - `API_RETRY_INTERVAL_SECONDS`
+- `API_TIMEOUT_SECONDS`
 - `LOG_LEVEL`
 - `STATE_DIR`
 - `LOG_DIR`
@@ -98,6 +100,9 @@ python -m ragflow_sync --dry-run
 ## Behavior
 
 - New files are uploaded and then scheduled for async parse.
+- Async parse is triggered in batches, 32 documents per batch by default. The
+  local process waits only for RAGFlow to accept each trigger request; it never
+  waits for parsing to finish.
 - Long local file names are truncated by UTF-8 byte length before upload. The
   visible stem is only for display; `path_sha16` and full 32-character MD5 are
   the stable recovery and de-duplication keys.

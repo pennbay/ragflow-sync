@@ -64,8 +64,10 @@ class SyncTargetConfig:
     max_file_size_mb: int
     upload_batch_size: int
     remote_page_size: int
+    parse_trigger_batch_size: int
     api_retry_times: int
     api_retry_interval_seconds: float
+    api_timeout_seconds: float
     log_level: str
     state_dir: Path
     log_dir: Path
