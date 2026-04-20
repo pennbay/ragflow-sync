@@ -16,7 +16,11 @@ DEFAULT_ALLOWED_EXTENSIONS = {
     ".markdown",
 }
 REMOTE_NAME_MARKER = "__rf__"
-STATE_VERSION = 1
+REMOTE_MD5_MARKER = "__md5__"
+RAGFLOW_FILENAME_MAX_BYTES = 255
+REMOTE_FILENAME_RESERVE_BYTES = 16
+REMOTE_NAME_MAX_BYTES = RAGFLOW_FILENAME_MAX_BYTES - REMOTE_FILENAME_RESERVE_BYTES
+STATE_VERSION = 2
 
 
 class ConfigError(RuntimeError):
@@ -88,6 +92,7 @@ class LocalFileSnapshot:
     rel_path: str
     filename: str
     remote_name: str
+    path_digest: str
     extension: str
     size: int
     mtime_ns: int
@@ -103,18 +108,23 @@ class RemoteDocumentSnapshot:
     progress: float
     chunk_count: int
     token_count: int
+    size: int = 0
+    meta_fields: Dict[str, object] = field(default_factory=dict)
 
 
 @dataclass
 class TrackedFileState:
     abs_path: str
+    rel_path: str
     remote_name: str
+    path_digest: str
     document_id: str
     md5: str
     mtime_ns: int
     size: int
     parse_retry_count: int = 0
     last_parse_trigger_at: str = ""
+    last_upload_at: str = ""
     last_error: str = ""
 
 
@@ -136,6 +146,13 @@ class DeleteAction:
 
 
 @dataclass(frozen=True)
+class AdoptAction:
+    local_file: LocalFileSnapshot
+    document_id: str
+    reason: str
+
+
+@dataclass(frozen=True)
 class UploadAction:
     local_file: LocalFileSnapshot
     reason: str
@@ -144,6 +161,7 @@ class UploadAction:
 
 @dataclass
 class SyncPlan:
+    adopt_actions: List[AdoptAction] = field(default_factory=list)
     delete_actions: List[DeleteAction] = field(default_factory=list)
     upload_actions: List[UploadAction] = field(default_factory=list)
     parse_actions: List[str] = field(default_factory=list)

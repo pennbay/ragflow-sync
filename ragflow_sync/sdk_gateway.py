@@ -76,6 +76,8 @@ class RagflowGateway:
                         progress=float(doc.progress or 0.0),
                         chunk_count=int(doc.chunk_count or 0),
                         token_count=int(doc.token_count or 0),
+                        size=int(doc.size or 0),
+                        meta_fields=dict(doc.meta_fields or {}),
                     )
                 )
             if len(batch) < self.config.remote_page_size:
@@ -83,7 +85,7 @@ class RagflowGateway:
             page += 1
         return documents
 
-    def upload_document(self, dataset_id: str, display_name: str, path: Path) -> RemoteDocumentSnapshot:
+    def upload_document_once(self, dataset_id: str, display_name: str, path: Path) -> RemoteDocumentSnapshot:
         dataset = self._dataset(dataset_id)
         def action():
             with path.open("rb") as handle:
@@ -98,8 +100,16 @@ class RagflowGateway:
                 progress=float(doc.progress or 0.0),
                 chunk_count=int(doc.chunk_count or 0),
                 token_count=int(doc.token_count or 0),
+                size=int(doc.size or 0),
+                meta_fields=dict(doc.meta_fields or {}),
             )
-        return self._retry(f"upload_document:{display_name}", action)
+        try:
+            return action()
+        except Exception as exc:
+            raise SyncApiError(f"upload_document:{display_name} failed: {exc}") from exc
+
+    def upload_document(self, dataset_id: str, display_name: str, path: Path) -> RemoteDocumentSnapshot:
+        return self.upload_document_once(dataset_id, display_name, path)
 
     def delete_documents(self, dataset_id: str, document_ids: List[str]) -> None:
         if not document_ids:

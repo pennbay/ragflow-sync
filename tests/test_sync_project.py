@@ -14,13 +14,21 @@ from ragflow_sync.models import (
     ConfigError,
     DatasetRef,
     ParseRunStatus,
+    REMOTE_NAME_MAX_BYTES,
     RemoteDocumentSnapshot,
     SyncState,
     SyncTargetConfig,
     TrackedFileState,
 )
 from ragflow_sync.planner import build_plan
-from ragflow_sync.scanner import is_managed_remote_name, remote_name_for, scan_local_files
+from ragflow_sync.scanner import (
+    is_managed_remote_name,
+    parse_managed_remote_name,
+    path_digest_for,
+    remote_name_for,
+    scan_local_files,
+    utf8_truncate,
+)
 from ragflow_sync.state_store import empty_state, load_state
 
 
@@ -46,11 +54,12 @@ def make_config(root: Path) -> SyncTargetConfig:
 
 
 class FakeGateway:
-    def __init__(self, docs=None):
+    def __init__(self, docs=None, fail_upload_once=False):
         self.docs = list(docs or [])
         self.deleted = []
         self.uploaded = []
         self.parsed = []
+        self.fail_upload_once = fail_upload_once
 
     def delete_documents(self, dataset_id, document_ids):
         self.deleted.extend(document_ids)
@@ -65,9 +74,15 @@ class FakeGateway:
             progress=0.0,
             chunk_count=0,
             token_count=0,
+            size=Path(path).stat().st_size,
         )
         self.uploaded.append((display_name, str(path)))
         self.docs.append(doc)
+        if self.fail_upload_once:
+            self.fail_upload_once = False
+            from ragflow_sync.models import SyncApiError
+
+            raise SyncApiError("simulated upload response failure")
         return doc
 
     def list_documents(self, dataset_id):
@@ -75,6 +90,28 @@ class FakeGateway:
 
     def trigger_async_parse(self, dataset_id, document_ids):
         self.parsed.extend(document_ids)
+
+
+class FailingParseGateway(FakeGateway):
+    def trigger_async_parse(self, dataset_id, document_ids):
+        from ragflow_sync.models import SyncApiError
+
+        raise SyncApiError("simulated parse failure")
+
+
+def tracked_for(local, document_id="doc1", **overrides):
+    values = {
+        "abs_path": local.abs_path,
+        "rel_path": local.rel_path,
+        "remote_name": local.remote_name,
+        "path_digest": local.path_digest,
+        "document_id": document_id,
+        "md5": local.md5,
+        "mtime_ns": local.mtime_ns,
+        "size": local.size,
+    }
+    values.update(overrides)
+    return TrackedFileState(**values)
 
 
 class SyncProjectTests(unittest.TestCase):
@@ -142,16 +179,69 @@ class SyncProjectTests(unittest.TestCase):
 
         self.assertEqual(1, len(files))
         local = next(iter(files.values()))
+        self.assertEqual(path_digest_for("doc.md"), local.path_digest)
+        self.assertEqual(remote_name_for("doc.md", "doc.md", local.md5), local.remote_name)
+        self.assertIn("__md5__", local.remote_name)
+        parsed = parse_managed_remote_name(local.remote_name)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(local.path_digest, parsed.path_digest)
+        self.assertEqual(local.md5, parsed.md5)
         self.assertTrue(local.remote_name.endswith(".md"))
+        self.assertLessEqual(len(local.remote_name.encode("utf-8")), REMOTE_NAME_MAX_BYTES)
         self.assertTrue(is_managed_remote_name(local.remote_name))
+        self.assertFalse(is_managed_remote_name("doc__rf__legacy.md"))
+
+    def test_remote_name_truncates_long_chinese_stem_by_utf8_bytes(self):
+        filename = f"{'超长文件名' * 40}.pdf"
+        rel_path = f"folder/{filename}"
+        md5 = "a" * 32
+
+        remote_name = remote_name_for(rel_path, filename, md5)
+        parsed = parse_managed_remote_name(remote_name)
+
+        self.assertLessEqual(len(remote_name.encode("utf-8")), REMOTE_NAME_MAX_BYTES)
+        self.assertTrue(remote_name.endswith(".pdf"))
+        self.assertIsNotNone(parsed)
+        self.assertEqual(path_digest_for(rel_path), parsed.path_digest)
+        self.assertEqual(md5, parsed.md5)
+        remote_name.encode("utf-8").decode("utf-8")
+
+    def test_remote_name_truncates_long_english_stem_by_utf8_bytes(self):
+        filename = f"{'very-long-title-' * 40}.md"
+        rel_path = f"notes/{filename}"
+        md5 = "b" * 32
+
+        remote_name = remote_name_for(rel_path, filename, md5)
+
+        self.assertLessEqual(len(remote_name.encode("utf-8")), REMOTE_NAME_MAX_BYTES)
+        self.assertTrue(remote_name.endswith(".md"))
+        self.assertTrue(is_managed_remote_name(remote_name))
+
+    def test_utf8_truncate_preserves_character_boundaries_and_fallback(self):
+        self.assertEqual("你", utf8_truncate("你好", 3))
+        self.assertEqual("file", utf8_truncate("你好", 2))
+        self.assertEqual("abc", utf8_truncate("abc   ", 6))
+
+    def test_remote_name_is_stable_for_same_long_file(self):
+        filename = f"{'资料' * 80}.pdf"
+        rel_path = f"archive/{filename}"
+        md5 = "c" * 32
+
+        first = remote_name_for(rel_path, filename, md5)
+        second = remote_name_for(rel_path, filename, md5)
+
+        self.assertEqual(first, second)
+        self.assertLessEqual(len(first.encode("utf-8")), REMOTE_NAME_MAX_BYTES)
 
     def test_scan_reuses_md5_for_unchanged_file(self):
         path = self.root / "doc.md"
         path.write_text("hello")
         config = make_config(self.root)
         abs_path = str(path.resolve())
+        rel_path = "doc.md"
+        remote_name = remote_name_for(rel_path, "doc.md", "cached-md5")
         state = SyncState(
-            version=1,
+            version=2,
             dataset_name=config.dataset_name,
             dataset_id="",
             target_root=str(config.local_dir),
@@ -159,7 +249,9 @@ class SyncProjectTests(unittest.TestCase):
             files={
                 abs_path: TrackedFileState(
                     abs_path=abs_path,
-                    remote_name=remote_name_for("doc.md", "doc.md"),
+                    rel_path=rel_path,
+                    remote_name=remote_name,
+                    path_digest=path_digest_for(rel_path),
                     document_id="doc1",
                     md5="cached-md5",
                     mtime_ns=path.stat().st_mtime_ns,
@@ -177,27 +269,20 @@ class SyncProjectTests(unittest.TestCase):
         path.write_text("hello")
         config = make_config(self.root)
         abs_path = str(path.resolve())
-        remote_name = remote_name_for("doc.md", "doc.md")
         local_files = scan_local_files(config, empty_state(config.dataset_name, "", str(config.local_dir)), self.logger)
+        local = local_files[abs_path]
         state = SyncState(
-            version=1,
+            version=2,
             dataset_name=config.dataset_name,
             dataset_id="ds1",
             target_root=str(config.local_dir),
             last_sync_at="",
             files={
-                abs_path: TrackedFileState(
-                    abs_path=abs_path,
-                    remote_name=remote_name,
-                    document_id="doc1",
-                    md5=local_files[abs_path].md5,
-                    mtime_ns=local_files[abs_path].mtime_ns,
-                    size=local_files[abs_path].size,
-                )
+                abs_path: tracked_for(local, document_id="doc1")
             },
         )
         remote_docs = [
-            RemoteDocumentSnapshot("doc1", remote_name, ParseRunStatus.UNSTART, 0.0, 0, 0)
+            RemoteDocumentSnapshot("doc1", local.remote_name, ParseRunStatus.UNSTART, 0.0, 0, 0)
         ]
 
         plan = build_plan(local_files, remote_docs, state, config)
@@ -210,26 +295,22 @@ class SyncProjectTests(unittest.TestCase):
         config = make_config(self.root)
         abs_path = str(path.resolve())
         local_files = scan_local_files(config, empty_state(config.dataset_name, "", str(config.local_dir)), self.logger)
-        remote_name = local_files[abs_path].remote_name
+        local = local_files[abs_path]
         state = SyncState(
-            version=1,
+            version=2,
             dataset_name=config.dataset_name,
             dataset_id="ds1",
             target_root=str(config.local_dir),
             last_sync_at="",
             files={
-                abs_path: TrackedFileState(
-                    abs_path=abs_path,
-                    remote_name=remote_name,
+                abs_path: tracked_for(
+                    local,
                     document_id="doc1",
-                    md5=local_files[abs_path].md5,
-                    mtime_ns=local_files[abs_path].mtime_ns,
-                    size=local_files[abs_path].size,
                     parse_retry_count=config.max_parse_retry_times,
                 )
             },
         )
-        remote_docs = [RemoteDocumentSnapshot("doc1", remote_name, ParseRunStatus.FAIL, 0.0, 0, 0)]
+        remote_docs = [RemoteDocumentSnapshot("doc1", local.remote_name, ParseRunStatus.FAIL, 0.0, 0, 0)]
 
         plan = build_plan(local_files, remote_docs, state, config)
 
@@ -239,8 +320,9 @@ class SyncProjectTests(unittest.TestCase):
     def test_planner_deletes_managed_orphan_remote_documents(self):
         config = make_config(self.root)
         state = empty_state(config.dataset_name, "ds1", str(config.local_dir))
+        remote_name = remote_name_for("ghost.md", "ghost.md", "0" * 32)
         remote_docs = [
-            RemoteDocumentSnapshot("doc1", remote_name_for("ghost.md", "ghost.md"), ParseRunStatus.DONE, 1.0, 2, 10),
+            RemoteDocumentSnapshot("doc1", remote_name, ParseRunStatus.DONE, 1.0, 2, 10),
             RemoteDocumentSnapshot("doc2", "manual-file.md", ParseRunStatus.DONE, 1.0, 2, 10),
         ]
 
@@ -249,6 +331,40 @@ class SyncProjectTests(unittest.TestCase):
         self.assertEqual(["doc1"], [item.document_id for item in plan.delete_actions])
         self.assertTrue(any("manual-file.md" in warning for warning in plan.warnings))
 
+    def test_planner_adopts_existing_v2_remote_when_state_missing(self):
+        path = self.root / "doc.md"
+        path.write_text("hello")
+        config = make_config(self.root)
+        state = empty_state(config.dataset_name, "ds1", str(config.local_dir))
+        local_files = scan_local_files(config, state, self.logger)
+        local = next(iter(local_files.values()))
+        remote_docs = [
+            RemoteDocumentSnapshot("doc1", local.remote_name, ParseRunStatus.UNSTART, 0.0, 0, 0)
+        ]
+
+        plan = build_plan(local_files, remote_docs, state, config)
+
+        self.assertEqual([], plan.upload_actions)
+        self.assertEqual(["doc1"], [item.document_id for item in plan.adopt_actions])
+        self.assertEqual(["doc1"], plan.parse_actions)
+
+    def test_planner_cleans_duplicate_v2_managed_documents(self):
+        path = self.root / "doc.md"
+        path.write_text("hello")
+        config = make_config(self.root)
+        state = empty_state(config.dataset_name, "ds1", str(config.local_dir))
+        local_files = scan_local_files(config, state, self.logger)
+        local = next(iter(local_files.values()))
+        remote_docs = [
+            RemoteDocumentSnapshot("doc1", local.remote_name, ParseRunStatus.DONE, 1.0, 1, 1),
+            RemoteDocumentSnapshot("doc2", local.remote_name, ParseRunStatus.DONE, 1.0, 1, 1),
+        ]
+
+        plan = build_plan(local_files, remote_docs, state, config)
+
+        self.assertEqual(["doc1"], [item.document_id for item in plan.adopt_actions])
+        self.assertEqual(["doc2"], [item.document_id for item in plan.delete_actions])
+
     def test_executor_uploads_then_deletes_previous_version_then_triggers_parse(self):
         path = self.root / "doc.md"
         path.write_text("new")
@@ -256,20 +372,13 @@ class SyncProjectTests(unittest.TestCase):
         local_files = scan_local_files(config, empty_state(config.dataset_name, "", str(config.local_dir)), self.logger)
         local = next(iter(local_files.values()))
         state = SyncState(
-            version=1,
+            version=2,
             dataset_name=config.dataset_name,
             dataset_id="ds1",
             target_root=str(config.local_dir),
             last_sync_at="",
             files={
-                local.abs_path: TrackedFileState(
-                    abs_path=local.abs_path,
-                    remote_name=local.remote_name,
-                    document_id="old-doc",
-                    md5="old-md5",
-                    mtime_ns=1,
-                    size=1,
-                )
+                local.abs_path: tracked_for(local, document_id="old-doc", md5="old-md5", mtime_ns=1, size=1)
             },
         )
         plan = build_plan(local_files, [], state, config)
@@ -296,6 +405,55 @@ class SyncProjectTests(unittest.TestCase):
         self.assertIn("Uploading file 1/1.", logs)
         self.assertIn("Uploaded file 1/1.", logs)
         self.assertIn("Async parse triggered successfully. count=1", logs)
+
+    def test_executor_persists_uploaded_state_before_parse(self):
+        path = self.root / "doc.md"
+        path.write_text("new")
+        config = make_config(self.root)
+        state = empty_state(config.dataset_name, "ds1", str(config.local_dir))
+        local_files = scan_local_files(config, state, self.logger)
+        local = next(iter(local_files.values()))
+        plan = build_plan(local_files, [], state, config)
+        gateway = FailingParseGateway()
+
+        with self.assertRaises(Exception):
+            execute_sync_plan(
+                gateway,
+                DatasetRef(dataset_id="ds1", dataset_name=config.dataset_name),
+                config,
+                state,
+                plan,
+                self.logger,
+                dry_run=False,
+            )
+
+        loaded = load_state(config.state_path, config.dataset_name, str(config.local_dir), self.logger)
+        self.assertEqual("up-1", loaded.files[local.abs_path].document_id)
+
+    def test_executor_recovers_when_upload_response_fails_after_remote_create(self):
+        path = self.root / "doc.md"
+        path.write_text("new")
+        config = make_config(self.root)
+        state = empty_state(config.dataset_name, "ds1", str(config.local_dir))
+        local_files = scan_local_files(config, state, self.logger)
+        local = next(iter(local_files.values()))
+        plan = build_plan(local_files, [], state, config)
+        gateway = FakeGateway(fail_upload_once=True)
+
+        code = execute_sync_plan(
+            gateway,
+            DatasetRef(dataset_id="ds1", dataset_name=config.dataset_name),
+            config,
+            state,
+            plan,
+            self.logger,
+            dry_run=False,
+        )
+
+        self.assertEqual(0, code)
+        self.assertEqual(1, len(gateway.uploaded))
+        self.assertEqual("up-1", state.files[local.abs_path].document_id)
+        self.assertEqual(["up-1"], gateway.parsed)
 
     def test_executor_dry_run_writes_nothing(self):
         path = self.root / "doc.md"
@@ -327,7 +485,7 @@ class SyncProjectTests(unittest.TestCase):
         backup = path.with_suffix(path.suffix + ".bak")
         path.write_text("{broken", encoding="utf-8")
         backup.write_text(
-            '{"version":1,"dataset_name":"dataset","dataset_id":"ds1","target_root":"x","last_sync_at":"","files":{}}',
+            '{"version":2,"dataset_name":"dataset","dataset_id":"ds1","target_root":"x","last_sync_at":"","files":{}}',
             encoding="utf-8",
         )
 
@@ -335,18 +493,38 @@ class SyncProjectTests(unittest.TestCase):
 
         self.assertEqual("ds1", state.dataset_id)
 
+    def test_state_store_ignores_old_schema(self):
+        config = make_config(self.root)
+        config.state_dir.mkdir(parents=True, exist_ok=True)
+        config.state_path.write_text(
+            '{"version":1,"dataset_name":"dataset","dataset_id":"old","target_root":"x","last_sync_at":"","files":{}}',
+            encoding="utf-8",
+        )
+
+        state = load_state(config.state_path, "dataset", "x", self.logger)
+
+        self.assertEqual(2, state.version)
+        self.assertEqual("", state.dataset_id)
+        self.assertEqual({}, state.files)
+        self.assertIn("unsupported state version", self.log_stream.getvalue())
+
     def test_run_target_uses_new_pipeline(self):
         config = make_config(self.root)
         (self.root / "doc.md").write_text("hello")
         with mock.patch("ragflow_sync.cli.RagflowGateway") as gateway_cls:
             gateway = gateway_cls.return_value
             gateway.get_or_create_dataset.return_value = DatasetRef("ds1", config.dataset_name)
+            local_state = empty_state(config.dataset_name, "", str(config.local_dir))
+            local = next(iter(scan_local_files(config, local_state, self.logger).values()))
             uploaded = RemoteDocumentSnapshot(
-                "doc1", remote_name_for("doc.md", "doc.md"), ParseRunStatus.UNSTART, 0.0, 0, 0
+                "doc1", local.remote_name, ParseRunStatus.UNSTART, 0.0, 0, 0
             )
             gateway.list_documents.side_effect = [[], [uploaded]]
             gateway.upload_document.return_value = RemoteDocumentSnapshot(
-                "doc1", remote_name_for("doc.md", "doc.md"), ParseRunStatus.UNSTART, 0.0, 0, 0
+                "doc1", local.remote_name, ParseRunStatus.UNSTART, 0.0, 0, 0
+            )
+            gateway.upload_document_once.return_value = RemoteDocumentSnapshot(
+                "doc1", local.remote_name, ParseRunStatus.UNSTART, 0.0, 0, 0
             )
             code = run_target(config, dry_run=False)
 
