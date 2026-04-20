@@ -57,19 +57,24 @@ def make_config(root: Path) -> SyncTargetConfig:
 
 
 class FakeGateway:
-    def __init__(self, docs=None, fail_upload_once=False):
+    def __init__(self, docs=None, fail_upload_once=False, fail_upload_names=None):
         self.docs = list(docs or [])
         self.deleted = []
         self.uploaded = []
         self.parsed = []
         self.parse_batches = []
         self.fail_upload_once = fail_upload_once
+        self.fail_upload_names = set(fail_upload_names or [])
 
     def delete_documents(self, dataset_id, document_ids):
         self.deleted.extend(document_ids)
         self.docs = [doc for doc in self.docs if doc.document_id not in set(document_ids)]
 
     def upload_document(self, dataset_id, display_name, path):
+        if display_name in self.fail_upload_names:
+            from ragflow_sync.models import SyncApiError
+
+            raise SyncApiError(f"simulated permanent upload failure for {display_name}")
         document_id = f"up-{len(self.uploaded) + 1}"
         doc = RemoteDocumentSnapshot(
             document_id=document_id,
@@ -494,6 +499,73 @@ class SyncProjectTests(unittest.TestCase):
         self.assertEqual(1, len(gateway.uploaded))
         self.assertEqual("up-1", state.files[local.abs_path].document_id)
         self.assertEqual(["up-1"], gateway.parsed)
+
+    def test_executor_continues_after_one_upload_failure(self):
+        config = make_config(self.root)
+        state = empty_state(config.dataset_name, "ds1", str(config.local_dir))
+        first_path = self.root / "first.md"
+        bad_path = self.root / "bad.md"
+        last_path = self.root / "last.md"
+        first_path.write_text("first")
+        bad_path.write_text("bad")
+        last_path.write_text("last")
+        local_files = scan_local_files(config, state, self.logger)
+        bad_local = next(local for local in local_files.values() if local.filename == "bad.md")
+        plan = build_plan(local_files, [], state, config)
+        gateway = FakeGateway(fail_upload_names={bad_local.remote_name})
+
+        code = execute_sync_plan(
+            gateway,
+            DatasetRef(dataset_id="ds1", dataset_name=config.dataset_name),
+            config,
+            state,
+            plan,
+            self.logger,
+            dry_run=False,
+        )
+
+        self.assertEqual(2, code)
+        self.assertEqual(2, len(gateway.uploaded))
+        self.assertEqual(2, len(gateway.parsed))
+        self.assertEqual("", state.files[bad_local.abs_path].document_id)
+        self.assertIn("simulated permanent upload failure", state.files[bad_local.abs_path].last_error)
+        logs = self.log_stream.getvalue()
+        self.assertIn("Upload phase completed. uploaded=2/3 failed=1", logs)
+        self.assertIn("Upload failure summary: path=bad.md", logs)
+
+    def test_executor_keeps_previous_remote_when_modified_upload_fails(self):
+        path = self.root / "doc.md"
+        path.write_text("new")
+        config = make_config(self.root)
+        local_files = scan_local_files(config, empty_state(config.dataset_name, "", str(config.local_dir)), self.logger)
+        local = next(iter(local_files.values()))
+        state = SyncState(
+            version=2,
+            dataset_name=config.dataset_name,
+            dataset_id="ds1",
+            target_root=str(config.local_dir),
+            last_sync_at="",
+            files={
+                local.abs_path: tracked_for(local, document_id="old-doc", md5="old-md5", mtime_ns=1, size=1)
+            },
+        )
+        plan = build_plan(local_files, [], state, config)
+        gateway = FakeGateway(fail_upload_names={local.remote_name})
+
+        code = execute_sync_plan(
+            gateway,
+            DatasetRef(dataset_id="ds1", dataset_name=config.dataset_name),
+            config,
+            state,
+            plan,
+            self.logger,
+            dry_run=False,
+        )
+
+        self.assertEqual(2, code)
+        self.assertEqual([], gateway.deleted)
+        self.assertEqual("", state.files[local.abs_path].document_id)
+        self.assertIn("simulated permanent upload failure", state.files[local.abs_path].last_error)
 
     def test_executor_triggers_parse_in_batches(self):
         config = make_config(self.root)

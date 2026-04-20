@@ -112,6 +112,9 @@ python -m ragflow_sync --dry-run
 - If an upload call fails after RAGFlow created the document, the executor lists
   remote documents immediately and adopts the matching v2 document before
   retrying.
+- If one file still fails after all upload retries, its error is saved in state
+  and the executor continues with remaining files. The run exits non-zero after
+  finishing the work that can be safely completed.
 - Modified files are uploaded as new remote documents first; old remote
   documents are deleted only after the new upload is visible.
 - Deleted local files cause matching managed remote documents to be deleted.

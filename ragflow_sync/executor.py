@@ -37,6 +37,23 @@ def _record_for_local_file(local_file, document_id: str, last_upload_at: str = "
     )
 
 
+def _record_upload_failure(local_file, error_message: str) -> TrackedFileState:
+    return TrackedFileState(
+        abs_path=local_file.abs_path,
+        rel_path=local_file.rel_path,
+        remote_name=local_file.remote_name,
+        path_digest=local_file.path_digest,
+        document_id="",
+        md5=local_file.md5,
+        mtime_ns=local_file.mtime_ns,
+        size=local_file.size,
+        parse_retry_count=0,
+        last_parse_trigger_at="",
+        last_upload_at="",
+        last_error=error_message,
+    )
+
+
 def _save_progress(config: SyncTargetConfig, state: SyncState, dataset_ref) -> None:
     state.dataset_id = dataset_ref.dataset_id
     state.dataset_name = dataset_ref.dataset_name
@@ -171,6 +188,7 @@ def execute_sync_plan(
 
     replacement_deletes: List[str] = []
     uploaded_doc_ids: List[str] = []
+    upload_failures: List[tuple[str, str]] = []
     total_uploads = len(plan.upload_actions)
     if total_uploads:
         logger.info("Upload phase started. total=%s batch_size=%s", total_uploads, config.upload_batch_size)
@@ -193,13 +211,28 @@ def execute_sync_plan(
                 action.local_file.rel_path,
                 action.local_file.remote_name,
             )
-            uploaded = _upload_with_recovery(
-                gateway,
-                dataset_ref.dataset_id,
-                action,
-                config,
-                logger,
-            )
+            try:
+                uploaded = _upload_with_recovery(
+                    gateway,
+                    dataset_ref.dataset_id,
+                    action,
+                    config,
+                    logger,
+                )
+            except SyncError as exc:
+                error_message = str(exc)
+                upload_failures.append((action.local_file.rel_path, error_message))
+                state.files[action.local_file.abs_path] = _record_upload_failure(
+                    action.local_file,
+                    error_message,
+                )
+                _save_progress(config, state, dataset_ref)
+                logger.warning(
+                    "Upload failed; continuing with remaining files. path=%s reason=%s",
+                    action.local_file.rel_path,
+                    error_message,
+                )
+                continue
             now = utc_now()
             state.files[action.local_file.abs_path] = _record_for_local_file(
                 action.local_file,
@@ -220,7 +253,14 @@ def execute_sync_plan(
                 replacement_deletes.append(action.previous_document_id)
 
     if total_uploads:
-        logger.info("Upload phase completed. uploaded=%s/%s", uploaded_count, total_uploads)
+        logger.info(
+            "Upload phase completed. uploaded=%s/%s failed=%s",
+            uploaded_count,
+            total_uploads,
+            len(upload_failures),
+        )
+    for rel_path, error_message in upload_failures:
+        logger.warning("Upload failure summary: path=%s reason=%s", rel_path, error_message)
 
     refreshed = gateway.list_documents(dataset_ref.dataset_id)
     refreshed_by_id: Dict[str, RemoteDocumentSnapshot] = {doc.document_id: doc for doc in refreshed}
@@ -274,4 +314,6 @@ def execute_sync_plan(
         logger.info("No documents require async parse.")
 
     _save_progress(config, state, dataset_ref)
+    if upload_failures:
+        return 2
     return 0
